@@ -105,3 +105,12 @@
 - 来源：work-desk L-10（`docs/handoff/UI与功能审核-20261023/审核记录.md` 第 3、4 条；`tests/mentor-snapshot.test.mjs`、`tests/reports-persist.test.mjs`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+
+## G-11 无头 Chrome 截图与合成事件不可靠：样式没加载完、焦点事件不发（2026-10-24 提升）
+
+- 现象：用 `--headless=new --screenshot --virtual-time-budget=…` 截图，有的页面 `@import` 进来的样式没生效、有的图没画出来，同一命令重跑结果不一样；用 `el.focus()` + 合成 `KeyboardEvent` 核对键盘交互，页面的 focus 处理根本没触发，截出来的状态和真实按键对不上。
+- 根因：`--virtual-time-budget` 只给虚拟时间设上限，不保证 `@import` 链、字体和模块里的异步请求都完成；页面不在前台（`document.hasFocus()` 为假）时，程序调 `focus()` 只改 `activeElement`，不发 focus / focusin 事件。
+- 正确做法：要等页面画完再截的图，用调试协议（`--remote-debugging-port` + `Runtime.evaluate` 轮询「目标元素已画出 + `document.fonts.status === "loaded"`」，再 `Page.captureScreenshot` 按元素区域截）；键盘、鼠标交互一律用真实输入（`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`，或浏览器里的真实按键），不拿合成事件的结果当证据。
+- 来源：work-desk L-13（`~/Library/Application Support/NiumaHome/evidence/折线图数值与悬停-20261024/` 的 `cdp-shot.mjs`、`cdp-debug.mjs`）。
+- 出现过的项目：work-desk。
+- 升级：未升级。
