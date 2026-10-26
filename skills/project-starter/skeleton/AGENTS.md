@@ -1,0 +1,51 @@
+# {{项目名}} 协作约定（Codex / Claude 必读）
+
+{{一句话说明}}。进入顺序：本文件 → [CURRENT.md](CURRENT.md)（当前状态与唯一下一步）。需求以 [{{需求文件}}]({{需求文件}}) 为准。所有面向用户的文字用简体中文。本文件只放怎么开始和做什么事之前读哪份；操作细节在 [docs/OPERATIONS.md](docs/OPERATIONS.md)，按需读对应一节。
+
+## 做什么事之前读哪份
+
+| 要做的事 | 先读 |
+|---|---|
+| 改需求、加功能 | [{{需求文件}}]({{需求文件}}) |
+| 排障、改脚本、装 launchd 或定时任务 | 先 `grep -n 关键词 docs/LESSONS.md`，再搜全局坑 `/Users/nat/Documents/ChatGPT/个人/work/agent-kit/LESSONS.md` |
+| 写交接、验收别人的交接 | [docs/templates/handoff.md](docs/templates/handoff.md) 骨架；[OPERATIONS](docs/OPERATIONS.md)「交接写法」「报告与验收」 |
+
+项目长出接口、样式、发布等文档后，在这张表里加一行。
+
+## 分工
+
+- 以用户每轮明确授权的范围为准；授权外的不做。
+- 一次只做一件授权的事；范围外的问题记进交接，不顺手修。
+- 并行的会话各开独立 worktree，不在同一目录改代码；做不到时照全局坑 G-04，只提交自己的改动。
+
+## 运行
+
+```sh
+node --test tests/*.test.mjs     # 交接格式 + 通用规则（含自测）
+node scripts/check-rules.mjs     # 只跑通用规则检查
+```
+
+## 结构
+
+```
+AGENTS.md            入口（本文件）
+CURRENT.md           当前状态与唯一下一步；每轮交接写在顶部
+{{需求文件}}          需求
+docs/
+  LESSONS.md         本项目的坑（排障、改脚本前先搜）
+  OPERATIONS.md      操作手册：交接写法、报告与验收
+  templates/handoff.md  交接一节的骨架
+scripts/
+  check-rules.mjs    通用规则检查（只查机器能判定的）
+tests/               node:test 测试
+```
+
+## 规则
+
+- 验证用的备份、日志等证据放 `{{证据目录}}`，不放 `/tmp`（全局坑 G-01）；私人数据与完整日志不进仓库。
+- 本机服务只监听 127.0.0.1；新增依赖先改 `scripts/check-rules.mjs` 的 `ALLOWED_DEPS`，并在交接里说明理由（`check-rules` 会查）。
+- 页面上的时间经统一的格式化函数按北京时间显示，不直接截取 ISO 字符串（全局坑 G-02，`check-rules` 会查）。
+
+## 交接格式
+
+每轮完成后，在 CURRENT.md 顶部新增一节（旧节保留在下面，过长时归档到 `docs/history/`），骨架照抄 [docs/templates/handoff.md](docs/templates/handoff.md)；`tests/handoff-format.test.mjs` 会检查顶部一节有没有日期、「时间：开工」「测试：」「本轮新坑：」三行，新坑编号在 LESSONS 里要存在。每一行怎么写、报告与验收的防伪造五条见 [OPERATIONS](docs/OPERATIONS.md)「交接写法」「报告与验收」；没做就写「未做」。
