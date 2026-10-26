@@ -58,6 +58,8 @@ tests/               node:test 测试
 
 single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见 `docs/agents/domain.md`。
 
+改动怎么走、分支怎么起名、交接写在哪、怎么合并：见 `/Users/nat/Documents/ChatGPT/个人/work/agent-kit/工程流程.md`。
+
 ## 规则
 
 - 验证用的备份、日志等证据放 `{{证据目录}}`，不放 `/tmp`（全局坑 G-01）；私人数据与完整日志不进仓库。
