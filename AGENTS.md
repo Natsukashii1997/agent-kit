@@ -23,3 +23,5 @@ Claude 和 Codex 跨项目共用的协作底座：全局坑 LESSONS 和项目起
 ### Domain docs
 
 single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见 `docs/agents/domain.md`。
+
+改动怎么走、分支怎么起名、交接写在哪、怎么合并：见 [工程流程.md](工程流程.md)。
