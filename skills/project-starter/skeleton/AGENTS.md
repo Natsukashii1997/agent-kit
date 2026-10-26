@@ -8,6 +8,7 @@
 |---|---|
 | 改需求、加功能 | [{{需求文件}}]({{需求文件}}) |
 | 排障、改脚本、装 launchd 或定时任务 | 先 `grep -n 关键词 docs/LESSONS.md`，再搜全局坑 `/Users/nat/Documents/ChatGPT/个人/work/agent-kit/LESSONS.md` |
+| 开需求、拆任务、实现、审查 | 下面「Agent skills」一节 |
 | 写交接、验收别人的交接 | [docs/templates/handoff.md](docs/templates/handoff.md) 骨架；[OPERATIONS](docs/OPERATIONS.md)「交接写法」「报告与验收」 |
 
 项目长出接口、样式、发布等文档后，在这张表里加一行。
@@ -32,6 +33,7 @@ AGENTS.md            入口（本文件）
 CURRENT.md           当前状态与唯一下一步；每轮交接写在顶部
 {{需求文件}}          需求
 docs/
+  agents/            Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
   LESSONS.md         本项目的坑（排障、改脚本前先搜）
   OPERATIONS.md      操作手册：交接写法、报告与验收
   templates/handoff.md  交接一节的骨架
@@ -39,6 +41,22 @@ scripts/
   check-rules.mjs    通用规则检查（只查机器能判定的）
 tests/               node:test 测试
 ```
+
+## Agent skills
+
+开发流程用 Matt Pocock skills（`~/.agents/skills/`）：大活走 `to-spec` → `to-tickets` → `implement` / `tdd` → `code-review` → PR；小改（一张 issue、一天内做完）跳过 `to-spec`。Claude 用 `/技能名`，Codex 用 `$技能名`；这几个技能只在点名时加载，不会自动触发。
+
+### Issue tracker
+
+需求、规格与任务用本仓库 GitHub Issues。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+五个默认分流标签。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见 `docs/agents/domain.md`。
 
 ## 规则
 
