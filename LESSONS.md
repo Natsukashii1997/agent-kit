@@ -11,7 +11,7 @@
 
 ## 怎么升级
 
-- 同一条在第二个项目又被踩到：「出现过的项目」补上；把一句话硬约束同时写进 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`（同一句，先给 diff 让用户确认），或写进 `skills/project-starter/skeleton/` 的模板或检查脚本，条目的「升级」写明去处。
+- 同一条在第二个项目又被踩到：「出现过的项目」补上；把一句话硬约束同时写进 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`（同一句，先给 diff 让用户确认），或写进 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/skeleton/`（project-starter 已迁到 my-skills）的模板或检查脚本，条目的「升级」写明去处。
 - 能用机器判定的：写进起步骨架的 `scripts/check-rules.mjs`，新项目一起步就带上。
 
 ---
