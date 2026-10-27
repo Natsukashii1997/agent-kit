@@ -5,7 +5,7 @@ Claude 和 Codex 跨项目共用的协作底座：全局坑 LESSONS 和项目起
 ## 规则
 
 - 改 LESSONS 和骨架都只出提案，常浩批准才写；每次改动单独提交，提交说明写来源（项目名 + 条目号，或每周整理的提案编号）。
-- `skills/project-starter/` 就是正在用的技能（`~/.agents/skills/project-starter` 链接到这里），改了马上生效，改前先在临时目录试铺。
+- 骨架 project-starter 已迁到 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/`（自建 skill 统一放 my-skills），改骨架在那个仓库改，改前先在临时目录试铺。
 - 不往这里写任何人的私人信息、账号或凭据。
 
 ## Agent skills

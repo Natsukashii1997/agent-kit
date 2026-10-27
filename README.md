@@ -5,7 +5,7 @@ Claude 和 Codex 跨项目共用的协作底座：各项目里换个项目也成
 ## 里面有什么
 
 - [LESSONS.md](LESSONS.md)：全局坑 G-xx。排障、发布、改脚本、装 launchd 或定时任务之前先 `grep`。
-- [skills/project-starter/](skills/project-starter/SKILL.md)：「项目起步」，给新项目铺两层骨架。`~/.agents/skills/project-starter` 是指向这里的链接，Claude 用 `/project-starter`，Codex 用 `$project-starter`。
+- 「项目起步」project-starter：给新项目铺两层骨架。2026-10-27 起和其他自建 skill 一起放在 [my-skills](https://github.com/Natsukashii1997/my-skills)（本机 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/`），`~/.agents/skills/project-starter` 是指向那里的链接，Claude 用 `/project-starter`，Codex 用 `$project-starter`。
 
 ## 分层
 
