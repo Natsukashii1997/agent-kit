@@ -153,3 +153,16 @@
 - 来源：digital-twin 2026-10-28（`CURRENT.md`「首日运行核对；巡检定时任务误报修复」一节；修复 PR #24 `38a8b7e`）。
 - 出现过的项目：digital-twin。
 - 升级：未升级。
+
+## G-15 改了 Safari「添加到程序坞」网页应用的包内文件再重签，应用打不开（2026-10-28 新增）
+
+- 现象：想换 macOS 程序坞里某个网页应用的图标，替换 `~/Applications/<名字>.app/Contents/Resources/ApplicationIcon.icns` 后用 `codesign --force --sign -` 重签，`codesign --verify --strict` 也通过，但点开弹「你不能打开应用程序……因为它可能已损坏或不完整」。另外，第一次替换直接报 `Operation not permitted`。
+- 根因：两层。① 这种应用是 Safari 生成的模板应用（`LSTemplateApplication`，没有可执行文件），系统登记了它生成时的签名；重签后 CDHash 变了，LaunchServices 报 `-10827 / -10410 Expected signature for template application did not match or was missing`，拒绝启动。② 改任何应用包都受「隐私与安全性 › App 管理」保护（`kTCCServiceSystemPolicyAppBundles`）；在 Claude Code 里，被拦的责任进程是 `~/Library/Application Support/Claude/claude-code/<版本>/<哈希>/claude.app`，不是桌面版 Claude。
+- 正确做法：
+  - 不改包内文件，也不重签。换图标用「自定义图标」：Finder 显示简介里贴图，或 `NSWorkspace setIcon:forFile:options:`。签名 CDHash 不变，应用照常打开；撤销时在显示简介里选中图标按删除键。
+  - 自定义图标会原样显示、系统不再切圆角，要先做成和系统图标一样的版式：1024 画布、824 圆角方形居中、外围留边加阴影，可以直接拿原图标的 alpha 当遮罩。
+  - 要彻底换，就改网站清单里的图标并发布，再在 Safari 里删掉旧应用、重新「添加到程序坞」（这个网页应用自己的登录状态和本地存储可能要重来）。
+  - 动包之前先整份 `ditto` 备份；改完必须实际打开一次，`codesign --verify` 通过不代表能启动。
+- 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 程序坞应用图标换成『A 数码夜景』」一节；交接 `docs/agents/handoffs/2026-10-28-claude-app-icon.md`；提交 `60856de`）。
+- 出现过的项目：personal-ai-workbench。
+- 升级：未升级。
