@@ -179,3 +179,15 @@
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 发布到正式 5178（wb-20261028-671）」一节；提交 `dd3b395`）；work-desk L-16（提交 `533cb89`，同为网页应用，未踩到、预防性修改）。
 - 出现过的项目：personal-ai-workbench（踩到）；work-desk（同类风险，预防修改）。
 - 升级：未升级。
+
+## G-17 WKWebView 窗口壳的「重新载入」菜单被 WKWebView 自己接走，外壳写的处理不执行（2026-10-31 新增）
+
+- 现象：原生窗口壳的「重新载入」（⌘R）菜单项，action 是 `reload:`，target 留空。外壳在 AppDelegate 里写的 `reload(_:)`（例如先做离开确认）从不执行，页面直接刷新了，看起来像功能正常。
+- 根因：target 为空时，菜单动作沿响应链找第一个能响应的对象。WKWebView 是第一响应者，它自己就实现了 `reload:`，比 AppDelegate 先接到。
+- 正确做法：
+  - 要走自己处理的菜单项，显式设 `item.target = self`，或者换一个 WKWebView 不实现的方法名。
+  - 加完要实际点一次菜单，确认走到了自己的代码（比如打一行日志），不能只看页面有没有刷新。
+  - 相关：WKWebView 退出、关窗时不触发 `beforeunload`，也不替页面弹离开确认（公开 API 没有对应的 UI 代理方法）。要保护页面里没保存的内容，就在 ⌘Q、⌘W、⌘R 之前自己在页面里派发一次 `beforeunload`，看 `defaultPrevented`，拦下了就弹原生确认框。
+- 来源：personal-ai-workbench 2026-10-31（`desktop/app-shell/DigitalWorld.swift`，PR #45；交接 `docs/agents/handoffs/2026-10-31-claude-native-app-shell-676.md`。调试实测：未设 target 时，自己的处理执行次数为 0）。
+- 出现过的项目：personal-ai-workbench（踩到，已修）；work-desk（`desktop/macos/NiumaHome.swift` 同样写法，未修，未实测）。
+- 升级：未升级。
