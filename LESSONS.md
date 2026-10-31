@@ -175,6 +175,7 @@
   - 首页（含前端路由回落返回的 `index.html`）一律 `Cache-Control: no-store`；带哈希的构建文件不用动。
   - 加一条测试起真实服务查首页响应头，免得以后改静态服务时丢掉。
   - 修好后第一次打开仍可能黑一次（磁盘里还有改前存下的旧首页），之后再发布、打开不黑才算验证。
+  - 根治（2026-10-31 补）：程序坞入口改成原生 WKWebView 外壳。外壳每次启动自己加载首页，按正常 HTTP 缓存规则走，不会恢复网页应用磁盘里的旧首页；还能自带图标（不受 G-15 限制），也能用按需下载的系统字体。外壳有自己的网页存储，网页应用里的 localStorage 带不过来，换之前先确认没有未保存草稿。目前只验证过换完后打开不黑，还没经过一次发布，未核实。参考写法：personal-ai-workbench `desktop/app-shell/`（PR #45）、work-desk `desktop/macos/NiumaHome.swift`。
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 发布到正式 5178（wb-20261028-671）」一节；提交 `dd3b395`）；work-desk L-16（提交 `533cb89`，同为网页应用，未踩到、预防性修改）。
 - 出现过的项目：personal-ai-workbench（踩到）；work-desk（同类风险，预防修改）。
 - 升级：未升级。
