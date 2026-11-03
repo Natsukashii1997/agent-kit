@@ -191,3 +191,15 @@
 - 来源：personal-ai-workbench 2026-10-31（`desktop/app-shell/DigitalWorld.swift`，PR #45；交接 `docs/agents/handoffs/2026-10-31-claude-native-app-shell-676.md`。调试实测：未设 target 时，自己的处理执行次数为 0）。
 - 出现过的项目：personal-ai-workbench（踩到，已修）；work-desk（`desktop/macos/NiumaHome.swift` 同样写法，未修，未实测）。
 - 升级：未升级。
+
+## G-18 launchctl bootout 返回时任务还没卸完，马上 bootstrap 报「Bootstrap failed: 5」，任务没装回去（2026-11-03 新增）
+
+- 现象：重装 launchd 任务的脚本先 `launchctl bootout gui/<uid>/<label>`，紧接着 `launchctl bootstrap gui/<uid> <plist>`，偶尔报 `Bootstrap failed: 5: Input/output error`；脚本开了 `set -e` 就此停下，任务处于「已卸下、没装回」状态。常驻服务（KeepAlive 的网站等）因此停掉，`launchctl print` 显示 `Could not find service`。手动再 bootstrap 一次就好，所以容易当成偶发。
+- 根因：bootout 是异步的，命令返回时旧任务（尤其要等进程退出的常驻服务）可能还在卸载中，这时 bootstrap 同一个 label 会失败。
+- 正确做法：
+  - bootout 之后用 `launchctl print gui/<uid>/<label>` 轮询，等它查不到了再 bootstrap（例如每 0.5 秒查一次，最多 10 秒）。
+  - bootstrap 失败隔几秒重试几次；都失败就非零退出，并写明 plist 已写好、怎么手动 bootstrap，别让服务悄悄停着。
+  - 重装完 `launchctl print` 看每个任务都在、常驻服务 state = running，再真实触发一次（同 G-05）。
+- 来源：github-center 2026-11-03（`scripts/schedule.sh install` 重装时网站任务没装回、停了几十秒，手动 bootstrap 恢复；修复 PR #45，用假 launchctl 复现旧脚本失败、新脚本通过）。
+- 出现过的项目：github-center（踩到，已修）。
+- 升级：未升级。
