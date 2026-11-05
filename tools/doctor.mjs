@@ -65,7 +65,7 @@ export function extractSection(text, heading) {
 
 // ---------- 各项检查：每项返回 { name, status, detail[] } ----------
 
-function checkHooks({ home, run, env }) {
+function checkHooks({ home, run, env, dir }) {
   const results = [];
   const settings = jsonOr(readText(path.join(home, '.claude', 'settings.json')));
   const cfg = JSON.parse(readText(path.join(KIT, 'config', 'claude-permissions.json')));
@@ -101,6 +101,18 @@ function checkHooks({ home, run, env }) {
       ? { name: 'Codex hook 与执行策略', status: 'warn', detail: [...codexProblems, '装法：node tools/install.mjs --apply'] }
       : { name: 'Codex hook 与执行策略', status: 'ok', detail: ['2 个 hook 和 agent-kit.rules 都在'] },
   );
+
+  // 装的是状态目录 runtime/ 里的副本：仓库里改了 hooks/ 或 LESSONS.md（比如加了新坑的「触发」行），要重装才生效
+  const runtime = path.join(dir, 'runtime');
+  if (hasGuard || hasRemind) {
+    const files = ['LESSONS.md', ...fs.readdirSync(path.join(KIT, 'hooks'), { recursive: true }).filter(f => f.endsWith('.mjs')).map(f => path.join('hooks', f))];
+    const stale = files.filter(f => readText(path.join(KIT, f)) !== readText(path.join(runtime, f)));
+    results.push(
+      stale.length
+        ? { name: '已装的 hook 与仓库一致', status: 'warn', detail: [`${stale.join('、')} 和仓库里的不一样`, '仓库在 main 上、拉到最新后重跑 node tools/install.mjs --apply；仓库不在 main 上时这条可以忽略'] }
+        : { name: '已装的 hook 与仓库一致', status: 'ok', detail: [`${runtime} 和仓库一致`] },
+    );
+  }
 
   // 两个 hook 真跑一次（装了但跑不起来，hook 默认放行，平时看不出来）。
   // 装了就原样执行设置里写的那条命令，这样 node 路径失效（比如 Homebrew 升级）也查得出来。

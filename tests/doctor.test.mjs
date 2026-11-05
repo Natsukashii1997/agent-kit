@@ -15,6 +15,8 @@ test('取一节正文：标题编号不同也能比', () => {
   assert.equal(extractSection(null, 'x'), null);
 });
 
+// 返回假的家目录；状态目录固定在 <home>/state，安装和体检用同一个
+const stateOf = home => path.join(home, 'state');
 function fakeHome({ claudeSection = '内容 A', codexSection = '内容 A', installed = true } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-doc-'));
   fs.mkdirSync(path.join(home, '.claude'));
@@ -24,7 +26,7 @@ function fakeHome({ claudeSection = '内容 A', codexSection = '内容 A', insta
   if (installed) {
     const log = console.log;
     console.log = () => {};
-    install(['--apply'], home, {});
+    install(['--apply', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: stateOf(home) });
     console.log = log;
   }
   return home;
@@ -38,9 +40,10 @@ const byName = (results, prefix) => results.find(r => r.name.startsWith(prefix))
 
 test('装好、两份指令一致：hook 检查和指令比对都通过', () => {
   const home = fakeHome();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const dir = stateOf(home);
   const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
   assert.equal(byName(res, 'Claude 权限规则').status, 'ok');
+  assert.equal(byName(res, '已装的 hook 与仓库一致').status, 'ok');
   assert.equal(byName(res, 'Codex hook').status, 'ok');
   assert.equal(byName(res, 'hook 实跑自检').status, 'ok');
   assert.equal(byName(res, '两份全局指令').status, 'ok');
@@ -75,9 +78,19 @@ test('仓库：本地 main 有没推的提交要报；读不了的目录指向 G
   assert.equal(byName(res, '仓库 clean').status, 'ok');
 });
 
-test('命令行跑一次：存报告，第一行开始时间，最后一行 exit N', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+test('已装的副本落后于仓库：提示重装', () => {
   const home = fakeHome();
+  const dir = stateOf(home);
+  fs.appendFileSync(path.join(dir, 'runtime', 'LESSONS.md'), '\n旧版本\n');
+  const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  const r = byName(res, '已装的 hook 与仓库一致');
+  assert.equal(r.status, 'warn');
+  assert.ok(r.detail[0].includes('LESSONS.md'));
+});
+
+test('命令行跑一次：存报告，第一行开始时间，最后一行 exit N', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
   const r = spawnSync(process.execPath, [path.resolve('tools/doctor.mjs')], { encoding: 'utf8', env: { ...process.env, AGENT_KIT_STATE_DIR: dir, HOME: home } });
   assert.ok([0, 1].includes(r.status), r.stderr);
   const files = fs.readdirSync(path.join(dir, 'doctor'));
@@ -93,7 +106,7 @@ test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失
   const s = JSON.parse(fs.readFileSync(file, 'utf8'));
   for (const g of s.hooks.PreToolUse) for (const h of g.hooks) h.command = h.command.replace(/^"[^"]+"/, '"/no/such/node"');
   fs.writeFileSync(file, JSON.stringify(s));
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const dir = stateOf(home);
   const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
   assert.equal(byName(res, 'hook 实跑自检').status, 'fail');
 });

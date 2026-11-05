@@ -87,6 +87,14 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["git", "push", ["-u", "--set-upstream"], ["origin", "upstream"], ["main", "master", "HEAD:main", "HEAD:master"]],
+    decision = "prompt",
+    justification = "推 main 前要先查别的会话没推的提交和私人内容（《工程流程》第 5 节第 1、2 步），常浩回「推」才推。",
+    match = ["git push -u origin main"],
+    not_match = ["git push -u origin claude/9-x"],
+)
+
+prefix_rule(
     pattern = ["git", "push", ["--delete", "-d"]],
     decision = "prompt",
     justification = "删除远端分支不可逆。",

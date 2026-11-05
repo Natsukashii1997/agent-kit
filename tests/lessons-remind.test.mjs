@@ -60,6 +60,7 @@ test('作为 hook 真跑：同一会话同一条只提醒一次，并记一行�
   const second = run('launchctl print gui/501/x');
   assert.equal(second.stdout, '', '同一会话第二次不再提醒');
   const log = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.ok(fs.existsSync(path.join(dir, 'remind-sessions')), '去重记录放在状态目录，不放 /tmp');
   assert.equal(log.length, 2);
   assert.deepEqual(log[1].reminded, []);
   assert.equal(run('git status').stdout, '');

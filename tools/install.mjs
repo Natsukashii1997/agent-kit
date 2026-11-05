@@ -1,19 +1,25 @@
 #!/usr/bin/env node
 // 把 agent-kit 的机器执行层装进本机的 Claude Code 和 Codex（第 1、2 件）。
 //   node tools/install.mjs            只预览会改什么，不写任何文件
-//   node tools/install.mjs --apply    真正写入；写之前把原文件备份成 *.bak-agent-kit-<时间>
+//   node tools/install.mjs --apply    真正写入
 //   node tools/install.mjs --uninstall [--apply]   去掉 agent-kit 加的东西，别的设置原样保留
 //   --only claude | --only codex      只装一边
-// 改的文件：~/.claude/settings.json（permissions.ask 和 hooks.PreToolUse）、
+//   --allow-any-branch                允许不在 main 上装（只给测试和有意为之时用）
+// 改的文件：~/.claude/settings.json（permissions.deny / ask 和 hooks.PreToolUse）、
 //          ~/.codex/hooks.json（hooks.PreToolUse）、~/.codex/rules/agent-kit.rules。
+// 写之前把原文件备份到状态目录 backups/<时间>/；hook 脚本和 LESSONS.md 复制到状态目录 runtime/ 再指向那里，
+// 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
+// 本次新增了哪些权限规则记在状态目录 install-manifest.json，卸载只删这些，你自己原有的同名规则不动。
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs'];
+const TIMEOUT_SEC = 10;
 
 export const isOurHook = h => typeof h?.command === 'string' && HOOK_FILES.some(f => h.command.includes(`hooks/${f}`));
 
@@ -25,13 +31,12 @@ export function stableNode(execPath = process.execPath, exists = fs.existsSync) 
   return execPath;
 }
 
-const cmd = (node, file) => `"${node}" "${path.join(KIT, 'hooks', file)}"`;
-
-export function ourHookGroups(tool, node = stableNode()) {
+export function ourHookGroups(tool, node = stableNode(), base = KIT) {
+  const cmd = (file, extra = '') => `"${node}" "${path.join(base, 'hooks', file)}"${extra}`;
   const remindMatcher = tool === 'claude' ? 'Bash|Edit|Write|MultiEdit|NotebookEdit' : 'Bash|apply_patch|Edit|Write';
   return [
-    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd(node, 'guard-git.mjs') }] },
-    { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd(node, 'lessons-remind.mjs') }] },
+    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs', tool === 'codex' ? ' --agent=codex' : ''), timeout: TIMEOUT_SEC }] },
+    { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd('lessons-remind.mjs'), timeout: TIMEOUT_SEC }] },
   ];
 }
 
@@ -71,31 +76,39 @@ function readJson(file) {
 
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
 
-function writeWithBackup(file, content, plan) {
-  if (fs.existsSync(file)) {
-    const bak = `${file}.bak-agent-kit-${stamp()}`;
-    fs.copyFileSync(file, bak);
-    plan.push(`  已备份 ${file} → ${bak}`);
-  }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, content);
-}
-
-// 装之前先让两个 hook 各跑一次，确认在这台电脑上能用
-export function selfTest(node = process.execPath) {
-  const run = (file, input, env = {}) =>
-    spawnSync(node, [path.join(KIT, 'hooks', file)], {
+// 装之前先让两个 hook 各跑一次，确认在这台电脑上能用。只测脚本本身；写进设置的那条命令能不能跑，由 tools/doctor.mjs 测。
+export function selfTest(base = KIT, node = process.execPath) {
+  const run = (file, input) =>
+    spawnSync(node, [path.join(base, 'hooks', file)], {
       input: JSON.stringify(input),
       encoding: 'utf8',
-      env: { ...process.env, AGENT_KIT_NO_LOG: '1', ...env },
+      env: { ...process.env, AGENT_KIT_NO_LOG: '1', AGENT_KIT_NO_DEDUPE: '1' },
       timeout: 10000,
     });
   const problems = [];
   const g = run('guard-git.mjs', { tool_name: 'Bash', tool_input: { command: 'git push --force origin main' } });
   if (g.status !== 0 || !String(g.stdout).includes('"deny"')) problems.push(`guard-git 没拦下强推 main（退出码 ${g.status}，${g.stderr || g.stdout}）`);
-  const r = run('lessons-remind.mjs', { session_id: `selftest-${process.pid}-${Date.now()}`, tool_name: 'Bash', tool_input: { command: 'launchctl bootstrap gui/501 x.plist' } });
+  const r = run('lessons-remind.mjs', { session_id: 'selftest', tool_name: 'Bash', tool_input: { command: 'launchctl bootstrap gui/501 x.plist' } });
   if (r.status !== 0 || !String(r.stdout).includes('G-05')) problems.push(`lessons-remind 没对 launchctl 给出 G-05 提醒（退出码 ${r.status}，${r.stderr || r.stdout}）`);
   return problems;
+}
+
+// 只从 main 上、没有未提交改动的主目录安装：hook 会在所有会话的每条命令前运行，必须是审过、合并过的版本
+export function branchProblem(kit = KIT) {
+  const git = args => spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8' });
+  const br = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (br.status !== 0) return '这个目录不是 git 仓库，认不出是不是 main 上的版本';
+  if (br.stdout.trim() !== 'main') return `当前在 ${br.stdout.trim()} 分支上，不是 main`;
+  const dirty = git(['status', '--porcelain', '--', 'hooks', 'config', 'LESSONS.md']).stdout.trim();
+  if (dirty) return `hooks/、config/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
+  return null;
+}
+
+function copyRuntime(dest) {
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.mkdirSync(dest, { recursive: true });
+  fs.cpSync(path.join(KIT, 'hooks'), path.join(dest, 'hooks'), { recursive: true, filter: src => !src.includes(`${path.sep}.`) });
+  fs.copyFileSync(path.join(KIT, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
 }
 
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
@@ -105,27 +118,58 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
   const only = onlyIdx >= 0 ? argv[onlyIdx + 1] : null;
   const doClaude = !only || only === 'claude';
   const doCodex = !only || only === 'codex';
+  const sd = stateDir(env, process.platform, home);
+  const runtime = path.join(sd, 'runtime');
+  const manifestFile = path.join(sd, 'install-manifest.json');
+  const manifest = readJson(manifestFile);
+  const nextManifest = structuredClone(manifest);
   const plan = [];
 
   if (!remove) {
+    const why = branchProblem();
+    if (why && !argv.includes('--allow-any-branch')) {
+      const msg = `不能从这里安装：${why}\n请在 agent-kit 主目录、main 分支、拉到最新后再装。`;
+      if (apply) {
+        console.error(`${msg}\n什么都没改。`);
+        return 1;
+      }
+      plan.push(`⚠ ${msg}（预览照常显示，--apply 会被拒绝）`);
+    }
     const problems = selfTest();
     if (problems.length) {
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
     plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒。');
+    plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
   const writes = [];
   if (doClaude) {
     const file = path.join(home, '.claude', 'settings.json');
     const before = readJson(file);
-    const { deny, ask } = JSON.parse(fs.readFileSync(path.join(KIT, 'config', 'claude-permissions.json'), 'utf8'));
-    const ruled = mergeRules(mergeRules(before, 'deny', deny, { remove }), 'ask', ask, { remove });
-    const after = mergeHooks(ruled, ourHookGroups('claude'), { remove });
-    const added = key => (after.permissions?.[key] || []).filter(r => !(before.permissions?.[key] || []).includes(r)).length;
+    const cfg = JSON.parse(fs.readFileSync(path.join(KIT, 'config', 'claude-permissions.json'), 'utf8'));
+    let after = before;
+    nextManifest.claude ||= {};
+    for (const key of ['deny', 'ask']) {
+      const had = before.permissions?.[key] || [];
+      const mine = manifest.claude?.[key] || [];
+      if (remove) after = mergeRules(after, key, mine, { remove: true });
+      else {
+        after = mergeRules(after, key, cfg[key]);
+        // 记下「这次新加的」加上「以前装时加的、现在还在的」；你原来就有的同名规则不算
+        nextManifest.claude[key] = [...new Set([...mine.filter(r => had.includes(r)), ...cfg[key].filter(r => !had.includes(r))])];
+      }
+    }
+    after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
     plan.push(`Claude Code：${file}`);
-    plan.push(remove ? '  去掉 agent-kit 的 permissions.deny / ask 规则和 2 个 hook' : `  permissions.deny 新增 ${added('deny')} 条、permissions.ask 新增 ${added('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind（旧的 agent-kit hook 先去掉）`);
+    if (remove) {
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 2 个 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 2 个 hook）');
+      delete nextManifest.claude;
+    } else {
+      const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、permissions.ask 新增 ${n('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind（旧的 agent-kit hook 先去掉）`);
+    }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
   }
@@ -133,7 +177,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     const codexHome = env.CODEX_HOME || path.join(home, '.codex');
     const file = path.join(codexHome, 'hooks.json');
     const before = readJson(file);
-    const after = mergeHooks(before, ourHookGroups('codex'), { remove });
+    const after = mergeHooks(before, ourHookGroups('codex', stableNode(), runtime), { remove });
     plan.push(`Codex：${file}`);
     plan.push(remove ? '  去掉 agent-kit 的 2 个 hook' : '  hooks.PreToolUse 放入 guard-git、lessons-remind');
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
@@ -147,7 +191,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       const src = fs.readFileSync(path.join(KIT, 'config', 'codex', 'agent-kit.rules'), 'utf8');
       if (fs.existsSync(rules) && fs.readFileSync(rules, 'utf8') === src) plan.push('  已是最新');
       else {
-        plan.push('  复制 config/codex/agent-kit.rules（先问再执行的 git / gh 操作）');
+        plan.push('  复制 config/codex/agent-kit.rules（禁止 / 先问的 git、gh 操作）');
         writes.push([rules, src]);
       }
     }
@@ -157,13 +201,33 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     console.log(`${plan.join('\n')}\n\n以上只是预览，没有改任何文件。确认后加 --apply 再跑一次。`);
     return 0;
   }
+  const backups = path.join(sd, 'backups', stamp());
   for (const [file, content] of writes) {
-    if (content === null) {
-      fs.copyFileSync(file, `${file}.bak-agent-kit-${stamp()}`);
-      fs.rmSync(file);
-    } else writeWithBackup(file, content, plan);
+    if (fs.existsSync(file)) {
+      const bak = path.join(backups, file.replace(home, '~').replace(/[/\\]/g, '__'));
+      fs.mkdirSync(backups, { recursive: true });
+      fs.copyFileSync(file, bak);
+      plan.push(`  已备份 ${file} → ${bak}`);
+    }
+    if (content === null) fs.rmSync(file);
+    else {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+    }
   }
-  console.log(`${plan.join('\n')}\n\n已写入 ${writes.length} 个文件。新开的 Claude Code / Codex 会话才生效；Claude 里可用 /hooks 查看，Codex 第一次可能要你确认信任这两个 hook。然后跑 node tools/doctor.mjs 核对。`);
+  if (remove) {
+    if (!doClaude || !doCodex) plan.push(`只卸了一边，${runtime} 保留给另一边用。`);
+    else fs.rmSync(runtime, { recursive: true, force: true });
+    if (nextManifest.claude) fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
+    else fs.rmSync(manifestFile, { force: true });
+  } else {
+    copyRuntime(runtime);
+    nextManifest.kit = KIT;
+    nextManifest.installedAt = new Date().toISOString();
+    fs.mkdirSync(sd, { recursive: true });
+    fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
+  }
+  console.log(`${plan.join('\n')}\n\n已写入 ${writes.length} 个设置文件（JSON 会重排成 2 空格缩进，内容不变）。新开的 Claude Code / Codex 会话才生效；Claude 里可用 /hooks 查看，Codex 第一次可能要你确认信任这两个 hook。然后跑 node tools/doctor.mjs 核对。`);
   return 0;
 }
 
@@ -171,7 +235,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     process.exitCode = main();
   } catch (err) {
-    console.error(`安装中断，没有写入：${err.message}`);
+    console.error(`安装中断：${err.message}`);
     process.exitCode = 1;
   }
 }

@@ -79,6 +79,14 @@ export function stripWrappers(tokens) {
       t.shift();
       continue;
     }
+    if (t[0] === 'env') {
+      t.shift();
+      while (t.length && (/^-/.test(t[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t[0]))) {
+        const opt = t.shift();
+        if (opt === '-u' || opt === '--unset' || opt === '-C' || opt === '--chdir') t.shift();
+      }
+      continue;
+    }
     if (t[0] === 'timeout' || t[0] === 'nice') {
       t.shift();
       while (t.length && /^-|^\d/.test(t[0])) t.shift();

@@ -21,6 +21,7 @@ test('Codex 执行策略：强推/删除 main 禁止，合并和推 main 先问�
     'git push origin +main': 'forbidden',
     'git push origin --delete master': 'forbidden',
     'git push origin main': 'prompt',
+    'git push -u origin main': 'prompt',
     'git push -f origin feature': 'prompt',
     'gh pr merge 9 --squash': 'prompt',
     'git reset --hard origin/main': 'prompt',

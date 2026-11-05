@@ -4,7 +4,6 @@
 // 把这几条坑的标题和正确做法的第一句提示给模型。只提醒，从不拦截；同一会话同一条只提醒一次。
 // 每次命中都追加一行到状态目录的 lessons-hits.jsonl，供每周整理统计「哪条坑被碰到了几次」。
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseJson, readStdin, stateDir } from './lib/common.mjs';
@@ -70,17 +69,30 @@ export function formatReminder(hits, file = LESSONS_FILE) {
   return `agent-kit 全局坑提醒（按关键词自动匹配，可能误报）：这一步可能碰到下面几条坑，动手前先读对应条目的「正确做法」。\n${lines.join('\n')}`;
 }
 
+// 「本会话已提醒过哪几条」记在状态目录 remind-sessions/ 下（不放 /tmp，G-01），7 天前的顺手清掉
 function seenFile(sessionId) {
-  return path.join(os.tmpdir(), 'agent-kit-remind', `${String(sessionId).replace(/[^\w.-]/g, '_')}.json`);
+  return path.join(stateDir(), 'remind-sessions', `${String(sessionId).replace(/[^\w.-]/g, '_')}.json`);
+}
+
+function prune(dir) {
+  try {
+    const cutoff = Date.now() - 7 * 864e5;
+    for (const f of fs.readdirSync(dir)) {
+      const full = path.join(dir, f);
+      if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full);
+    }
+  } catch {}
 }
 
 function filterUnseen(sessionId, hits) {
-  if (!sessionId) return hits;
+  if (!sessionId || process.env.AGENT_KIT_NO_DEDUPE) return hits;
   const file = seenFile(sessionId);
   let seen = [];
   try {
     seen = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {}
+  } catch {
+    prune(path.dirname(file));
+  }
   const fresh = hits.filter(h => !seen.includes(h.id));
   if (fresh.length) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
