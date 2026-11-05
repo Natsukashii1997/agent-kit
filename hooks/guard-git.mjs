@@ -9,8 +9,7 @@
 // 出错时不拦（退出码 1，hook 默认放行），只往 stderr 写原因；`node tools/doctor.mjs` 会自检这个 hook。
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { parseJson, readStdin, splitCommands, stripWrappers, tokenize } from './lib/common.mjs';
+import { isEntry, parseJson, readStdin, splitCommands, stripWrappers, tokenize } from './lib/common.mjs';
 
 const PROTECTED = new Set(['main', 'master']);
 const isProtected = ref => PROTECTED.has(String(ref).replace(/^refs\/heads\//, ''));
@@ -131,7 +130,7 @@ export function hookOutput(result, agent = 'claude') {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntry(import.meta.url)) {
   try {
     const input = parseJson(readStdin()) || {};
     const command = input.tool_input?.command;

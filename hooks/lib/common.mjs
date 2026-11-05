@@ -3,6 +3,17 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 这个文件是不是被 node 直接运行的入口。两边都取真实路径再比：经符号链接启动时（macOS 的 /var → /private/var），
+// 只比字面路径会认不出自己，hook 就什么都不做、等于放行。
+export function isEntry(metaUrl) {
+  try {
+    return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(metaUrl));
+  } catch {
+    return false;
+  }
+}
 
 // 持久状态目录（不放 /tmp，见全局坑 G-01）。测试和特殊情况用 AGENT_KIT_STATE_DIR 覆盖。
 export function stateDir(env = process.env, platform = process.platform, home = os.homedir()) {

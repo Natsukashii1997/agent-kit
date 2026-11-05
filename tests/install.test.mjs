@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -121,4 +121,17 @@ test('Homebrew 的 node 换成不随版本变的入口', async () => {
   assert.equal(stableNode('/opt/homebrew/Cellar/node/22.9.0/bin/node', p => p === '/opt/homebrew/bin/node'), '/opt/homebrew/bin/node');
   assert.equal(stableNode('/usr/local/bin/node', () => true), '/usr/local/bin/node');
   assert.equal(stableNode('/opt/homebrew/Cellar/node/22.9.0/bin/node', () => false), '/opt/homebrew/Cellar/node/22.9.0/bin/node');
+});
+
+test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/worktrees）也整份复制，只跳过 hooks 里的隐藏文件', () => {
+  const kit = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-')), '.claude', 'worktrees', 'x');
+  fs.mkdirSync(path.join(kit, 'hooks', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(kit, 'hooks', 'guard-git.mjs'), '');
+  fs.writeFileSync(path.join(kit, 'hooks', 'lib', 'common.mjs'), '');
+  fs.writeFileSync(path.join(kit, 'hooks', '.DS_Store'), '');
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), '');
+  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-')), 'runtime');
+  copyRuntime(dest, kit);
+  assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs']);
+  assert.ok(fs.existsSync(path.join(dest, 'LESSONS.md')));
 });

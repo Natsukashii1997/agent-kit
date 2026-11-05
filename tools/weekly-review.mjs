@@ -8,8 +8,7 @@
 //   node tools/weekly-review.mjs --stdout   直接打印内容
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { stateDir } from '../hooks/lib/common.mjs';
+import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { parseLessons, LESSONS_FILE } from '../hooks/lessons-remind.mjs';
 import { formatReport, runDoctor } from './doctor.mjs';
 
@@ -60,7 +59,7 @@ export function build({ now = Date.now(), dir = stateDir() } = {}) {
   return { day, text: `${lines.join('\n')}\n` };
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntry(import.meta.url)) {
   try {
     const dir = stateDir();
     const { day, text } = build({ dir });

@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateDir } from '../hooks/lib/common.mjs';
+import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs'];
@@ -104,11 +104,13 @@ export function branchProblem(kit = KIT) {
   return null;
 }
 
-function copyRuntime(dest) {
+export function copyRuntime(dest, kit = KIT) {
+  const hooks = path.join(kit, 'hooks');
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(dest, { recursive: true });
-  fs.cpSync(path.join(KIT, 'hooks'), path.join(dest, 'hooks'), { recursive: true, filter: src => !src.includes(`${path.sep}.`) });
-  fs.copyFileSync(path.join(KIT, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
+  // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过
+  fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.')) });
+  fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
 }
 
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
@@ -231,7 +233,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
   return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntry(import.meta.url)) {
   try {
     process.exitCode = main();
   } catch (err) {

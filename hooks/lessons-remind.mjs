@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseJson, readStdin, stateDir } from './lib/common.mjs';
+import { isEntry, parseJson, readStdin, stateDir } from './lib/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const LESSONS_FILE = path.resolve(HERE, '..', 'LESSONS.md');
@@ -129,7 +129,7 @@ export function run(input, lessonsText) {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntry(import.meta.url)) {
   try {
     const input = parseJson(readStdin()) || {};
     const out = run(input, fs.readFileSync(LESSONS_FILE, 'utf8'));

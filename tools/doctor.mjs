@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stateDir } from '../hooks/lib/common.mjs';
+import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -258,7 +258,7 @@ function main(argv = process.argv.slice(2)) {
   return code;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isEntry(import.meta.url)) {
   try {
     process.exitCode = main();
   } catch (err) {

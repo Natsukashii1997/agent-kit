@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -85,4 +87,12 @@ test('作为 hook 真跑：读标准输入、输出 JSON、退出码 0', () => {
   const garbage = spawnSync(process.execPath, [file], { input: 'not json', encoding: 'utf8' });
   assert.equal(garbage.status, 0);
   assert.equal(garbage.stdout, '');
+});
+
+test('经符号链接的路径启动也照样拦（macOS 的 /var 就是指向 /private/var 的链接）', () => {
+  const hooks = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
+  const link = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-link-')), 'hooks');
+  fs.symlinkSync(hooks, link);
+  const r = spawnSync(process.execPath, [path.join(link, 'guard-git.mjs')], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push -f origin main' } }), encoding: 'utf8' });
+  assert.match(r.stdout, /"permissionDecision":"deny"/, '入口判断认不出自己时，hook 什么都不做、直接放行');
 });
