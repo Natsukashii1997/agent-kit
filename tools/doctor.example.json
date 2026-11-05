@@ -1,0 +1,9 @@
+{
+  "说明": "可选。复制到 ~/Library/Application Support/agent-kit/doctor.json 再按本机实际改；没有这个文件也能跑，只是不查仓库。launchd、Hermes 定时任务、crontab 的体检归 my-skills 的 automation-checkup（my-skills#30），这里不配。",
+  "instructionSection": "跨项目沉淀",
+  "repos": [
+    "/Users/you/Documents/ChatGPT/个人/work/agent-kit"
+  ],
+  "fetch": true,
+  "mainBranch": "main"
+}
