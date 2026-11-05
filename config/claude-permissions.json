@@ -1,0 +1,25 @@
+{
+  "说明": "第 1 件：不可逆操作「先问常浩」。由 tools/install.mjs 合并进 ~/.claude/settings.json 的 permissions.ask；官方文档说明 ask 规则在自动模式下也会弹出确认，复合命令里任何一段命中都会问。强推或删除 main/master 由 hooks/guard-git.mjs 直接拒绝，不在这里。",
+  "ask": [
+    "Bash(gh pr merge *)",
+    "Bash(git push --force *)",
+    "Bash(git push -f *)",
+    "Bash(git push * --force)",
+    "Bash(git push * --force *)",
+    "Bash(git push * -f)",
+    "Bash(git push * -f *)",
+    "Bash(git push * main)",
+    "Bash(git push * main *)",
+    "Bash(git push * master)",
+    "Bash(git push * master *)",
+    "Bash(git push *:main)",
+    "Bash(git push *:master)",
+    "Bash(git push --delete *)",
+    "Bash(git push * --delete *)",
+    "Bash(git reset --hard *)",
+    "Bash(git clean *)",
+    "Bash(git branch -D *)",
+    "Bash(git stash drop *)",
+    "Bash(git stash clear *)"
+  ]
+}

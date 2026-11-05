@@ -1,0 +1,82 @@
+# agent-kit 第 1 件：不可逆操作「先问常浩」（Codex 执行策略规则）。
+# 由 tools/install.mjs 复制到 ~/.codex/rules/agent-kit.rules。规则按前缀匹配：
+# 只认写在最前面的参数，所以 `git push origin feature --force` 这种把 --force 写在最后的问不到，
+# 强推 main/master 另由 hooks/guard-git.mjs 直接拒绝。
+# 每条的 match / not_match 是加载时 Codex 自己会跑的例子，写错了 Codex 会报错，改完先跑：
+#   codex execpolicy check --rules config/codex/agent-kit.rules git push -f origin x
+
+prefix_rule(
+    pattern = ["gh", "pr", "merge"],
+    decision = "prompt",
+    justification = "合并由常浩说了算（《工程流程》第 5 节）。",
+    match = ["gh pr merge 12 --squash"],
+    not_match = ["gh pr view 12"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["-f", "--force"]],
+    decision = "prompt",
+    justification = "分支上的强推只用 --force-with-lease（《工程流程》第 3 节）。",
+    match = ["git push -f origin feature", "git push --force"],
+    not_match = ["git push --force-with-lease origin feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["-f", "--force"]],
+    decision = "prompt",
+    justification = "分支上的强推只用 --force-with-lease（《工程流程》第 3 节）。",
+    match = ["git push origin --force feature"],
+    not_match = ["git push origin feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["main", "master", "HEAD:main", "HEAD:master"]],
+    decision = "prompt",
+    justification = "推 main 前要先查别的会话没推的提交和私人内容（《工程流程》第 5 节第 1、2 步），常浩回「推」才推。",
+    match = ["git push origin main", "git push origin HEAD:main"],
+    not_match = ["git push origin feature/main-page"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["--delete", "-d"]],
+    decision = "prompt",
+    justification = "删除远端分支不可逆。",
+    match = ["git push --delete origin old"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["--delete", "-d"]],
+    decision = "prompt",
+    justification = "删除远端分支不可逆。",
+    match = ["git push origin --delete old"],
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "prompt",
+    justification = "会丢掉没提交的改动，可能是别的会话的（全局坑 G-04）。",
+    match = ["git reset --hard origin/main"],
+    not_match = ["git reset --soft HEAD~1"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean"],
+    decision = "prompt",
+    justification = "会删掉没纳入版本管理的文件。",
+    match = ["git clean -fd"],
+)
+
+prefix_rule(
+    pattern = ["git", "branch", "-D"],
+    decision = "prompt",
+    justification = "强制删除没合并的分支。",
+    match = ["git branch -D feature"],
+    not_match = ["git branch -d feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "stash", ["drop", "clear"]],
+    decision = "prompt",
+    justification = "各 worktree 共用一个 stash 栈，删了可能是别人的（全局坑 G-04）。",
+    match = ["git stash drop", "git stash clear"],
+)
