@@ -6,6 +6,7 @@
 > - **my-skills 未读**：本会话申请读取私有仓库 `Natsukashii1997/my-skills`，被会话权限拒绝。骨架 project-starter 的现状，改用本仓库提交 `151caa5` 之前（2026-10-27 迁走前）的快照作证据。迁走后骨架又改了什么，**未核实**。
 > - **Codex 官方文档没读全**：developers.openai.com 被网络代理拦截。只从 `openai/codex` 仓库确认 Codex 有生命周期 hook 和执行策略规则（exec policy），具体写法**未核实**。
 > - **本机设置看不到**：云端会话看不到你本机的 `~/.claude/settings.json`、`~/.codex/`、launchd 任务和 Hermes 配置。表里写「未知」的都属于这一类。
+> - **已补本机核对**：同日由本机 Claude 会话逐条核对了本机现状，并抽查了官方文档原文，结果见**第 5 节**。第 1～4 节保留调研时的原样；两处说法不一致时，以第 5 节为准。
 
 ---
 
@@ -195,6 +196,40 @@
 **本仓库内的证据**
 - `AGENTS.md`、`README.md`、`LESSONS.md`（G-01 到 G-18）、`工程流程.md`、`docs/agents/*.md`、`.github/pull_request_template.md`
 - 骨架快照：`git show 151caa5^:skills/project-starter/…`（`SKILL.md`、`skeleton/AGENTS.md`、`skeleton/docs/OPERATIONS.md`、`skeleton/docs/LESSONS.md`、`skeleton/docs/templates/handoff.md`、`skeleton/scripts/check-rules.mjs`）
+
+---
+
+## 5. 本机核对补充（2026-11-05，本机 Claude 会话）
+
+第 1～4 节在云端写成，看不到本机。下面是同一天在常浩的 Mac 上逐条核对的结果。只读查看，没有改任何设置。
+
+### 5.1 关于你现状的说法
+
+| 报告原来的说法 | 本机核对结果 | 对结论的影响 |
+|---|---|---|
+| 「全仓库和骨架里一个 hook 都没有」 | 只对仓库成立。本机 Claude（`~/.claude/settings.json`）有 9 个 hook，分布在 6 个时刻：会话开始 2、发消息时 3、工具执行后 1、请求权限时 1、通知 1、压缩前 1。用途是会话自动命名和归组、上下文到 50% 提醒交接、把状态推给 PostPane。Codex（`~/.codex/hooks.json`）有 7 个：会话开始 3、发消息时 3、请求权限时 1，用途是会话命名和归组。**没有一个是在命令执行前拦截危险操作的**（没有 `PreToolUse`） | 结论不变：缺的是「拦截」这一层，不是 hook 本身。第 1 节第一句的「一个 hook 都没有」应理解为「没有起拦截作用的 hook」 |
+| 第 1 件：给不可逆操作加权限规则 | `~/.claude/settings.json` 里没有任何权限规则（没有 `permissions` 段）；`~/.codex/rules/` 目录存在但是空的。另外本机已经装了 Matt Pocock 的 `git-guardrails-claude-code` skill，它就是用来设置「拦危险 git 命令」的 hook | **仍排第一，而且有现成工具**。做法建议：硬红线（强推 main）用权限规则 `deny`，其余（推 main、`gh pr merge`、`git reset --hard`）用 `ask`；`git-guardrails-claude-code` 可作补充，但按官方文档，hook 默认出错放行，硬限制仍以权限规则为准。Codex 侧在 `~/.codex/rules/` 里写执行策略规则 |
+| 「18 条全局坑全部写着『升级：未升级』」 | 属实：`LESSONS.md` 共 18 条，18 条都是「升级：未升级」 | 无 |
+| 「两份全局指令靠人工保持一字不差」 | 目前一致：`~/.claude/CLAUDE.md` 第 7 节和 `~/.codex/AGENTS.md` 的「跨项目沉淀（agent-kit）」正文逐字相同，只有标题差一个编号「7.」 | 风险真实但还没出过事，第 5 件可往后放 |
+| 第 3 件：本机体检（doctor） | 同日已有现成实现：`my-skills` 的 `automation-checkup` skill（PR #30，草稿），只读体检所有 launchd 任务、hermes cron 和 crontab，分三档出报告。本机实跑一次约 3 秒，查出两个 Hermes 网关本次登录以来分别重启 17 次和 10 次（上次退出码 1、75）、飞书频道桥跑在 `bridge-candidates/…` 候选目录里、几个已停用任务的 plist 残留。另有 digital-twin 的 `cn.digital-twin.health` 每日健康检查 | 第 3 件改为「合并 PR #30 并按需定时跑」，不必另起项目 |
+| 第 4 件：用 sheal 试点会话复盘 | 同日已有自建替代：`my-skills` 的 `session-retro` skill（PR #28，草稿），纯本地、只出提案、片段脱敏，不需要让第三方工具读全部会话记录；已按本机真实记录适配新版 Codex 格式 | 第 4 件改为「用 session-retro 试点」，第 1 节表里 ①②③ 三个隐私问题随之消失 |
+| 自动记忆「默认开启」，与「提炼成规则要先经我同意」冲突 | 属实：`autoMemoryEnabled` 没设置，即为默认开启；本机会话确实在用 | 仍要你定：关掉，或保留并在每周整理时看一眼 |
+
+### 5.2 官方文档原文抽查
+
+下载了 `code.claude.com/docs/en/` 下 memory、hooks、best-practices、routines 四页的 `.md` 原文，逐条对照，报告引用的这些说法都能在原文找到：
+
+- best-practices：「Deterministic and non-deterministic instructions」一节，hook、deny 规则、托管设置属于「Claude Code 每次都执行」的确定性指令；「Enforce the rules that can't have exceptions」。
+- memory：`/doctor prompt-audit` 检查指令文件里过期或冲突的内容；auto memory「在本机会话中默认开启」；每次加载前 200 行或 25KB。
+- hooks：`onFailure` 可选 `"continue"`（默认）或 `"block"`；hook 出错时默认放行。
+- routines：云端定时任务目前是研究预览版。
+
+### 5.3 补充后的优先顺序（建议，常浩确认后才算数）
+
+1. **加权限规则**（原第 1 件）：Claude 和 Codex 两边都加。名单要你点头，这是改本机设置。
+2. **合并体检（my-skills#30）和会话复盘（my-skills#28）**：原第 3、4 件就此落地。
+3. **定自动记忆开还是关**。
+4. LESSONS 按关键词提醒（原第 2 件）、两份全局指令单一来源（原第 5 件）：往后放。
 
 ---
 
