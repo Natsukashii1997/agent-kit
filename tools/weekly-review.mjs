@@ -1,12 +1,11 @@
 #!/usr/bin/env node
-// 第 4 件：每周整理的输入材料。把三样东西汇成一份 Markdown，存在状态目录 weekly/ 下：
-//   1. 本机体检结果（tools/doctor.mjs）；
-//   2. 近 7 天哪几条全局坑被 hook 碰到了几次（lessons-hits.jsonl），附在哪些项目碰到的；
-//   3. 如果装了 sheal：近 7 天的工作摘要和花费（只用本地分析，不带 --enrich / --agent / --slack）。
+// 第 4 件的一部分：每周整理的输入材料。把两样只有 agent-kit 有的数据汇成一份 Markdown，存在状态目录 weekly/ 下：
+//   1. agent-kit 自检结果（tools/doctor.mjs）；
+//   2. 近 7 天哪几条全局坑被 hook 碰到了几次（lessons-hits.jsonl），附在哪些项目、几个会话碰到的。
+// 会话复盘本身用 my-skills 的 session-retro（my-skills#28），这里不重复做。
 // 它只汇总、不下结论，也不写任何规则；「哪条该升级、哪个是新坑」由每周整理的人来判断，照 LESSONS「只出提案」。
 //   node tools/weekly-review.mjs            生成并打印文件路径
 //   node tools/weekly-review.mjs --stdout   直接打印内容
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,24 +43,11 @@ export function summarizeHits(text, now, titles = {}) {
   ];
 }
 
-// sheal 把进度提示也打在标准输出里：去掉第一个标题之前的行，再把标题降三级，免得和本文件的标题打架
-export function tidyDigest(text) {
-  const lines = String(text).split('\n');
-  const start = lines.findIndex(l => /^#\s/.test(l));
-  return (start < 0 ? lines : lines.slice(start)).map(l => (/^#{1,3}\s/.test(l) ? `###${l}` : l)).join('\n').trim();
-}
-
-function sheal(args) {
-  const r = spawnSync('sheal', args, { encoding: 'utf8', timeout: 120000 });
-  if (r.error && r.error.code === 'ENOENT') return null;
-  return { code: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
-}
-
-export function build({ now = Date.now(), dir = stateDir(), useSheal = true } = {}) {
+export function build({ now = Date.now(), dir = stateDir() } = {}) {
   const day = new Date(now).toISOString().slice(0, 10);
   const lines = [`# 每周整理输入（${day}）`, '', '自动汇总，只是材料，不是结论。新坑、升级都按 LESSONS 只出提案。', ''];
 
-  lines.push('## 1. 本机体检', '', '```', ...formatReport(runDoctor({ dir }), new Date(now).toISOString()), '```', '');
+  lines.push('## 1. agent-kit 自检', '', '```', ...formatReport(runDoctor({ dir }), new Date(now).toISOString()), '```', '');
 
   const titles = Object.fromEntries(parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8')).map(e => [e.id, e.title]));
   let hits = '';
@@ -70,15 +56,7 @@ export function build({ now = Date.now(), dir = stateDir(), useSheal = true } = 
   } catch {}
   lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
 
-  lines.push('## 3. 会话复盘（sheal，本地分析）', '');
-  const digest = useSheal ? sheal(['digest', '--since', '7 days', '-f', 'markdown']) : null;
-  if (!digest) lines.push('没装 sheal，跳过。试点装法见 docs/机器执行层.md「第 4 件」。');
-  else {
-    lines.push('### 工作摘要（sheal digest）', '', digest.code === 0 ? tidyDigest(digest.out) || '（空）' : `sheal digest 失败：${digest.err.split('\n')[0]}`, '');
-    const cost = sheal(['cost', '--since', '7 days']);
-    lines.push('### 花费（sheal cost）', '', '```', cost && cost.code === 0 ? cost.out || '（空）' : `sheal cost 失败：${cost?.err.split('\n')[0]}`, '```', '');
-    lines.push('想细看某个项目最近一次会话的失败循环：在那个项目目录里跑 `sheal retro`（不加 --enrich）。');
-  }
+  lines.push('## 3. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
   return { day, text: `${lines.join('\n')}\n` };
 }
 

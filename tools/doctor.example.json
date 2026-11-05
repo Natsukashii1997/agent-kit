@@ -1,26 +1,9 @@
 {
-  "说明": "复制到 ~/Library/Application Support/agent-kit/doctor.json 再按本机实际改。下面的 label、路径、命令都是示意，不是你本机的真实值；每一项删掉就不查。",
+  "说明": "可选。复制到 ~/Library/Application Support/agent-kit/doctor.json 再按本机实际改；没有这个文件也能跑，只是不查仓库。launchd、Hermes 定时任务、crontab 的体检归 my-skills 的 automation-checkup（my-skills#30），这里不配。",
   "instructionSection": "跨项目沉淀",
-  "launchd": [
-    { "label": "com.example.daily-job", "keepAlive": false },
-    { "label": "com.example.preview-site", "keepAlive": true }
-  ],
-  "logs": [
-    { "name": "每日数据任务", "path": "/Users/you/Library/Application Support/Example/logs/daily.log", "maxAgeHours": 26 }
-  ],
-  "rebootWindowHours": 24,
   "repos": [
     "/Users/you/Documents/ChatGPT/个人/work/agent-kit"
   ],
   "fetch": true,
-  "mainBranch": "main",
-  "commands": [],
-  "commands_样例_待核实": [
-    {
-      "name": "Hermes 定时任务未处理的失败记录（G-14）",
-      "cmd": ["hermes", "cron", "incidents", "--state", "detected"],
-      "okWhen": { "exitCode": 0, "stdoutNotMatch": "待按本机输出填：只在有未处理记录时才出现的字样" },
-      "note": "输出格式未核实：第一次在本机跑一遍这条命令，看「没有记录」和「有记录」时分别输出什么，再填 stdoutNotMatch。不要用「有输出就算有问题」（G-14 的误报就是这么来的）。"
-    }
-  ]
+  "mainBranch": "main"
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// 第 3 件（含第 5 件的比对）：本机体检。专查「出了事没人发现」的那一类，对应全局坑 G-05、G-12、G-14、G-18。
+// 第 3 件（含第 5 件的比对）：agent-kit 自检。只查 agent-kit 自己装进本机的东西和它管的约定：
+// 权限规则与 hook 装没装、能不能真跑；两份全局指令是否一致；自动记忆状态；坑提醒命中；可选查各仓库本地 main 有没有没推的提交。
+// launchd、Hermes 定时任务、crontab 的体检归 my-skills 的 automation-checkup（my-skills#30），这里不重复做。
 //   node tools/doctor.mjs              体检，结果打在屏幕上，同时存一份报告
 //   node tools/doctor.mjs --json       输出 JSON（给定时任务或别的脚本用）
 //   node tools/doctor.mjs --no-save    不存报告
@@ -39,24 +41,6 @@ const jsonOr = (text, fallback = {}) => {
 
 // ---------- 解析函数（单独导出，测试直接测） ----------
 
-// launchctl print gui/<uid>/<label> 的输出 → { state, lastExit, stdoutPath, stderrPath }
-export function parseLaunchctlPrint(text) {
-  const get = re => (text.match(re) || [])[1];
-  const lastExit = get(/^\s*last exit code = (.+)$/m);
-  return {
-    state: get(/^\s*state = (\S+)/m) || null,
-    lastExit: lastExit === undefined ? null : lastExit.trim(),
-    stdoutPath: get(/^\s*stdout path = (.+)$/m)?.trim() || null,
-    stderrPath: get(/^\s*stderr path = (.+)$/m)?.trim() || null,
-  };
-}
-
-// sysctl -n kern.boottime 的输出（{ sec = 1730000000, usec = 0 } Mon …）→ 毫秒时间戳
-export function parseBoottime(text) {
-  const m = String(text).match(/sec\s*=\s*(\d+)/);
-  return m ? Number(m[1]) * 1000 : null;
-}
-
 // 从 Markdown 里取标题含 heading 的那一节正文（不含标题行本身，到下一个同级或更高级标题为止）
 export function extractSection(text, heading) {
   if (!text) return null;
@@ -79,32 +63,23 @@ export function extractSection(text, heading) {
     .trim();
 }
 
-// 长任务日志：最后一个非空行应为 exit N（G-12）
-export function checkLogTail(text) {
-  const lines = String(text).split('\n').map(l => l.trim()).filter(Boolean);
-  const last = lines[lines.length - 1] || '';
-  const m = last.match(/^exit\s+(-?\d+)/i);
-  return m ? { finished: true, code: Number(m[1]) } : { finished: false, code: null };
-}
-
 // ---------- 各项检查：每项返回 { name, status, detail[] } ----------
 
 function checkHooks({ home, run, env }) {
   const results = [];
   const settings = jsonOr(readText(path.join(home, '.claude', 'settings.json')));
-  const want = JSON.parse(readText(path.join(KIT, 'config', 'claude-permissions.json'))).ask;
-  const have = settings.permissions?.ask || [];
-  const missing = want.filter(r => !have.includes(r));
+  const cfg = JSON.parse(readText(path.join(KIT, 'config', 'claude-permissions.json')));
+  const missing = [...cfg.deny.filter(r => !(settings.permissions?.deny || []).includes(r)), ...cfg.ask.filter(r => !(settings.permissions?.ask || []).includes(r))];
   const hookCmds = (settings.hooks?.PreToolUse || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
   const hasGuard = hookCmds.some(c => c.includes('hooks/guard-git.mjs'));
   const hasRemind = hookCmds.some(c => c.includes('hooks/lessons-remind.mjs'));
-  if (!missing.length && hasGuard && hasRemind) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${want.length} 条先问规则、2 个 hook 都在`] });
+  if (!missing.length && hasGuard && hasRemind) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则、${cfg.ask.length} 条先问规则、2 个 hook 都在`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
       status: 'warn',
       detail: [
-        ...(missing.length ? [`缺 ${missing.length} 条先问规则，例如 ${missing[0]}`] : []),
+        ...(missing.length ? [`缺 ${missing.length} 条权限规则，例如 ${missing[0]}`] : []),
         ...(!hasGuard ? ['没装 guard-git'] : []),
         ...(!hasRemind ? ['没装 lessons-remind'] : []),
         '装法：node tools/install.mjs --apply',
@@ -195,74 +170,6 @@ function checkLessonHits({ now, dir }) {
   };
 }
 
-function checkLaunchd({ config, run, platform, uid, statFn }) {
-  const jobs = config.launchd || [];
-  if (!jobs.length || platform !== 'darwin') return [];
-  return jobs.map(job => {
-    const label = typeof job === 'string' ? job : job.label;
-    const keepAlive = typeof job === 'object' && job.keepAlive;
-    const name = `launchd ${label}`;
-    const r = run('launchctl', ['print', `gui/${uid}/${label}`]);
-    if (r.code !== 0) return { name, status: 'fail', detail: ['没加载（launchctl print 查不到）。可能是重装时没装回（G-18）或从没装过'] };
-    const p = parseLaunchctlPrint(r.stdout);
-    const detail = [];
-    let status = 'ok';
-    if (keepAlive && p.state !== 'running') {
-      status = 'fail';
-      detail.push(`常驻服务没在跑（state = ${p.state}）`);
-    }
-    if (p.lastExit && !/^0\b|never exited/.test(p.lastExit)) {
-      status = status === 'fail' ? 'fail' : 'warn';
-      detail.push(`上次退出码 ${p.lastExit}${/126/.test(p.lastExit) ? '（126 多半是 G-05：launchd 读不了「文稿」）' : ''}`);
-    }
-    const out = p.stdoutPath && statFn(p.stdoutPath);
-    const err = p.stderrPath && p.stderrPath !== p.stdoutPath && statFn(p.stderrPath);
-    if (err && err.size > 0 && (!out || err.mtimeMs > out.mtimeMs)) {
-      status = status === 'fail' ? 'fail' : 'warn';
-      detail.push(`错误日志比正常日志新，要看：${p.stderrPath}`);
-    }
-    if (!detail.length) detail.push(`已加载${p.state ? `，state = ${p.state}` : ''}${p.lastExit ? `，上次退出码 ${p.lastExit}` : ''}`);
-    return { name, status, detail };
-  });
-}
-
-function checkLogs({ config, now, statFn }) {
-  return (config.logs || []).map(log => {
-    const name = `日志 ${log.name || log.path}`;
-    const st = statFn(log.path);
-    if (!st) return { name, status: 'warn', detail: [`找不到 ${log.path}`] };
-    const tail = checkLogTail(readText(log.path) || '');
-    const ageH = (now - st.mtimeMs) / 36e5;
-    if (log.maxAgeHours && ageH > log.maxAgeHours) return { name, status: 'warn', detail: [`${ageH.toFixed(0)} 小时没更新（应不超过 ${log.maxAgeHours} 小时），可能没跑`] };
-    if (!tail.finished) return { name, status: ageH > 1 ? 'warn' : 'info', detail: [ageH > 1 ? '最后一行不是 exit N：可能没跑完或被打断（G-12）' : '还在写，可能正在跑'] };
-    if (tail.code !== 0) return { name, status: 'fail', detail: [`上次 exit ${tail.code}`] };
-    return { name, status: 'ok', detail: [`exit 0，${ageH.toFixed(0)} 小时前`] };
-  });
-}
-
-function checkReboot({ config, run, platform, now, uid }) {
-  if (platform !== 'darwin') return [];
-  const r = run('sysctl', ['-n', 'kern.boottime']);
-  const boot = parseBoottime(r.stdout);
-  if (!boot) return [{ name: '开机时间', status: 'warn', detail: ['读不到 kern.boottime'] }];
-  const hours = (now - boot) / 36e5;
-  const windowH = config.rebootWindowHours ?? 24;
-  if (hours > windowH) return [{ name: '开机时间', status: 'ok', detail: [`已运行 ${hours.toFixed(0)} 小时`] }];
-  const keep = (config.launchd || []).filter(j => typeof j === 'object' && j.keepAlive).map(j => j.label);
-  const down = keep.filter(label => parseLaunchctlPrint(run('launchctl', ['print', `gui/${uid}/${label}`]).stdout).state !== 'running');
-  return [
-    {
-      name: '开机时间',
-      status: 'warn',
-      detail: [
-        `${hours.toFixed(1)} 小时前重启过：会话里起的后台任务、等着到点再跑的脚本都已经没了（G-12）`,
-        down.length ? `没在跑的常驻服务：${down.join('、')}` : '配置里的常驻服务都在跑',
-        '本机预览网站、实验进程不在配置里的，要自己核一遍',
-      ],
-    },
-  ];
-}
-
 function checkRepos({ config, run }) {
   return (config.repos || []).map(repo => {
     const name = `仓库 ${path.basename(repo)}`;
@@ -284,20 +191,6 @@ function checkRepos({ config, run }) {
   });
 }
 
-// 自定义命令检查（Hermes 等）：okWhen 可写 exitCode、stdoutEmpty、stdoutNotMatch（正则）
-function checkCommands({ config, run }) {
-  return (config.commands || []).map(c => {
-    const r = run(c.cmd[0], c.cmd.slice(1));
-    const ok = c.okWhen || { exitCode: 0 };
-    const why = [];
-    if (r.code === null || (r.stderr && /ENOENT/.test(r.stderr))) return { name: c.name, status: 'warn', detail: [`跑不起来：${c.cmd.join(' ')}`] };
-    if (ok.exitCode !== undefined && r.code !== ok.exitCode) why.push(`退出码 ${r.code}`);
-    if (ok.stdoutEmpty && r.stdout.trim()) why.push(`有输出：${r.stdout.trim().split('\n').slice(0, 3).join(' / ')}`);
-    if (ok.stdoutNotMatch && new RegExp(ok.stdoutNotMatch, 'm').test(r.stdout)) why.push(`输出里有「${ok.stdoutNotMatch}」：${r.stdout.trim().split('\n')[0]}`);
-    return why.length ? { name: c.name, status: c.failStatus || 'warn', detail: [...why, ...(c.note ? [c.note] : [])] } : { name: c.name, status: 'ok', detail: ['正常'] };
-  });
-}
-
 export function runDoctor(deps = {}) {
   const env = deps.env || process.env;
   const home = deps.home || os.homedir();
@@ -305,19 +198,8 @@ export function runDoctor(deps = {}) {
     env,
     home,
     run: deps.run || defaultRun,
-    platform: deps.platform || process.platform,
     now: deps.now ?? Date.now(),
-    uid: deps.uid ?? (process.getuid ? process.getuid() : 0),
     dir: deps.dir || stateDir(env, deps.platform || process.platform, home),
-    statFn:
-      deps.statFn ||
-      (f => {
-        try {
-          return fs.statSync(f);
-        } catch {
-          return null;
-        }
-      }),
     config: deps.config || {},
   };
   return [
@@ -325,11 +207,7 @@ export function runDoctor(deps = {}) {
     checkInstructionSync(ctx),
     checkAutoMemory(ctx),
     checkLessonHits(ctx),
-    ...checkLaunchd(ctx),
-    ...checkLogs(ctx),
-    ...checkReboot(ctx),
     ...checkRepos(ctx),
-    ...checkCommands(ctx),
   ];
 }
 
