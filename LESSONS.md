@@ -6,13 +6,16 @@
 
 - 只收换个项目也成立的坑：不依赖某个项目的业务、页面或发布脚本。只对某个项目成立的，留在那个项目的 `docs/LESSONS.md`。
 - 从项目提升上来：写成 G-xx，编号只增不改；措辞去掉项目专有名词；「来源」写项目名、原条目号和能查的证据。原条目保留，加一行「提升：已提升为全局 G-xx（日期）」。
-- 一条一个坑，写现象、根因、正确做法、来源、出现过的项目、升级。证据查不到就写「未核实」，不编。结论被推翻时改条目并注明日期，不删。
+- 一条一个坑，写现象、根因、正确做法、来源、出现过的项目、升级、触发。证据查不到就写「未核实」，不编。结论被推翻时改条目并注明日期，不删。
+- 「触发」写碰到这条坑时命令或代码里会出现的词，每个词用反引号括起来、用顿号隔开；前后带 `/` 的按正则匹配（不分大小写）。装了 agent-kit 的 hook 后（见 [docs/机器执行层.md](docs/机器执行层.md)），Claude 和 Codex 执行的命令或要写的内容里出现这些词，就会自动收到这条坑的提醒。想不出可靠的词就写「无」并说明原因；词太宽会天天误报，宁缺毋滥。`node --test tests/*.test.mjs` 会检查每条都有「触发」一行、正则能编译。
 - 只出提案、用户批准才写：当轮交接里提，或由项目的每周整理（G 类）提。
 
 ## 怎么升级
 
 - 同一条在第二个项目又被踩到：「出现过的项目」补上；把一句话硬约束同时写进 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`（同一句，先给 diff 让用户确认），或写进 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/skeleton/`（project-starter 已迁到 my-skills）的模板或检查脚本，条目的「升级」写明去处。
 - 能用机器判定的：写进起步骨架的 `scripts/check-rules.mjs`，新项目一起步就带上。
+- 「出事了没人发现」一类（定时任务没跑、失败记录没关、服务停了）：写进本机体检（launchd、Hermes 定时任务归 my-skills 的 automation-checkup；agent-kit 自己装的东西归 `tools/doctor.mjs`），条目的「升级」写明哪一项检查。
+- 关键词提醒（「触发」一行）是每条都有的底线，不算升级。
 
 ---
 
@@ -24,6 +27,7 @@
 - 来源：work-desk L-02（`docs/history/CURRENT-through-20261022.md` 开头的 2026-10-23 补注）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`/(^|[^\w/])\/tmp\//`（只认直接写到 /tmp/ 的路径；Claude 自己的临时目录 /private/tmp/claude-… 和 os.tmpdir() 不算）
 
 ## G-02 页面直接截取 ISO 时间字符串，把 UTC 当本地时间显示（2026-10-24 提升）
 
@@ -33,6 +37,7 @@
 - 来源：work-desk L-03（提交 `3200d0e`；2026-10-23 每周整理试跑又发现 3 处）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`/\.slice\(\s*(0\s*,\s*1[06]|5\s*,\s*16|11\s*,\s*16)\s*\)/`、`/replace\(\s*['"]T['"]\s*,\s*['"] ['"]/`
 
 ## G-03 改了脚本只做语法或单条路径验证，没跑全量测试（2026-10-24 提升）
 
@@ -42,6 +47,7 @@
 - 来源：work-desk L-06（提交 `b5c212d` 引入，修复是测试里补的桩）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`/scripts\/[^\s]+\.(sh|mjs|js|py)/`
 
 ## G-04 并行会话共用一个工作区，测试互相污染、提交带上别人的改动（2026-10-24 提升）
 
@@ -51,6 +57,7 @@
 - 来源：work-desk L-07（2026-10-23 首次；2026-10-24 提交 `359ac18` 再犯）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`git stash`、`git add -A`、`git add --all`、`git add .`
 
 ## G-05 launchd 里用 /bin/bash 读不了「文稿」下的脚本（2026-10-24 提升）
 
@@ -60,6 +67,7 @@
 - 来源：work-desk L-08（`scripts/health-check.sh` 的 `--install`；证据 `~/Library/Application Support/NiumaHome/evidence/每日巡检-20261023/`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`launchctl`、`LaunchAgents`、`/\.plist\b/`
 
 ## G-06 PlistBuddy 找不到文件时把提示打到标准输出（2026-10-24 提升）
 
@@ -69,6 +77,7 @@
 - 来源：work-desk L-09（`scripts/health-check.sh` 读数据目录那几行）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`PlistBuddy`
 
 ## G-07 本机服务只监听 127.0.0.1，仍挡不住浏览器里任意网页发来的请求（2026-10-24 提升）
 
@@ -78,6 +87,7 @@
 - 来源：work-desk L-11（`server/http.mjs` 的 `checkOrigin`、`tests/request-guard.test.mjs`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`.listen(`、`createServer(`
 
 ## G-08 `set -u` 脚本里可选开关裸引用，变量不设就整段退出（2026-10-24 提升）
 
@@ -87,6 +97,7 @@
 - 来源：work-desk L-12（`~/Library/Application Support/NiumaHome/evidence/全面优化-20261023/release.log`；修复提交 `359ac18`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`/\bset -[a-z]*u/`
 
 ## G-09 改界面时把原有强调色、状态样式改没了（2026-10-24 提升）
 
@@ -96,6 +107,7 @@
 - 来源：work-desk L-01（用户 2026-10-18 当面反馈；对应提交未核实）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：无（界面改动太泛，靠人记）
 
 ## G-10 外部只读来源每次现读，页面每次打开都要等（2026-10-24 提升）
 
@@ -105,6 +117,7 @@
 - 来源：work-desk L-10（`docs/handoff/UI与功能审核-20261023/审核记录.md` 第 3、4 条；`tests/mentor-snapshot.test.mjs`、`tests/reports-persist.test.mjs`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`feishu`、`larksuite`
 
 ## G-11 无头 Chrome 截图与合成事件不可靠：样式没加载完、焦点事件不发（2026-10-24 提升）
 
@@ -114,6 +127,7 @@
 - 来源：work-desk L-13（`~/Library/Application Support/NiumaHome/evidence/折线图数值与悬停-20261024/` 的 `cdp-shot.mjs`、`cdp-debug.mjs`）。
 - 出现过的项目：work-desk。
 - 升级：未升级。
+- 触发：`--headless`、`--screenshot`、`virtual-time-budget`、`new KeyboardEvent`
 
 ## G-12 电脑重启，会话里等着到点再跑的后台任务落空，也没人发现（2026-10-24 新增）
 
@@ -128,6 +142,7 @@
 - 来源：github-center 2026-10-24（`CURRENT.md` 2026-10-24 10:40 条；Issue #11 完成记录的“真实运行”一节）。
 - 出现过的项目：github-center。
 - 升级：未升级。
+- 触发：`nohup`、`disown`、`/sleep\s+\d{4,}/`、`kern.boottime`
 
 ## G-13 回退测试用了不存在的模型名，留下长期冷却，辅助任务全部掉到回退模型（2026-10-27 新增）
 
@@ -141,6 +156,7 @@
 - 来源：digital-twin 2026-10-27（`CURRENT.md`「Hermes 辅助任务改回 Codex」一节；证据 `~/Library/Application Support/DigitalTwin/evidence/hermes-aux-codex-20261027/`）。
 - 出现过的项目：digital-twin。
 - 升级：未升级。
+- 触发：`hermes auth`、`model_cooldowns`
 
 ## G-14 删了一次性探针定时任务，它失败留下的记录还在，巡检第二天误报（2026-10-28 新增）
 
@@ -153,6 +169,7 @@
 - 来源：digital-twin 2026-10-28（`CURRENT.md`「首日运行核对；巡检定时任务误报修复」一节；修复 PR #24 `38a8b7e`）。
 - 出现过的项目：digital-twin。
 - 升级：未升级。
+- 触发：`hermes cron`
 
 ## G-15 改了 Safari「添加到程序坞」网页应用的包内文件再重签，应用打不开（2026-10-28 新增）
 
@@ -166,6 +183,7 @@
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 程序坞应用图标换成『A 数码夜景』」一节；交接 `docs/agents/handoffs/2026-10-28-claude-app-icon.md`；提交 `60856de`）。
 - 出现过的项目：personal-ai-workbench。
 - 升级：未升级。
+- 触发：`codesign`、`.app/Contents`、`ApplicationIcon`
 
 ## G-16 Safari「添加到程序坞」网页应用打开时用磁盘里的旧首页：发布换了哈希就黑屏，刷新才好（2026-10-28 新增）
 
@@ -179,6 +197,7 @@
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 发布到正式 5178（wb-20261028-671）」一节；提交 `dd3b395`）；work-desk L-16（提交 `533cb89`，同为网页应用，未踩到、预防性修改）。
 - 出现过的项目：personal-ai-workbench（踩到）；work-desk（同类风险，预防修改）。
 - 升级：未升级。
+- 触发：`Cache-Control`、`no-cache`
 
 ## G-17 WKWebView 窗口壳的「重新载入」菜单被 WKWebView 自己接走，外壳写的处理不执行（2026-10-31 新增）
 
@@ -191,6 +210,7 @@
 - 来源：personal-ai-workbench 2026-10-31（`desktop/app-shell/DigitalWorld.swift`，PR #45；交接 `docs/agents/handoffs/2026-10-31-claude-native-app-shell-676.md`。调试实测：未设 target 时，自己的处理执行次数为 0）。
 - 出现过的项目：personal-ai-workbench（踩到，已修）；work-desk（`desktop/macos/NiumaHome.swift` 同样写法，未修，未实测）。
 - 升级：未升级。
+- 触发：`WKWebView`、`reload:`
 
 ## G-18 launchctl bootout 返回时任务还没卸完，马上 bootstrap 报「Bootstrap failed: 5」，任务没装回去（2026-11-03 新增）
 
@@ -203,3 +223,4 @@
 - 来源：github-center 2026-11-03（`scripts/schedule.sh install` 重装时网站任务没装回、停了几十秒，手动 bootstrap 恢复；修复 PR #45，用假 launchctl 复现旧脚本失败、新脚本通过）。
 - 出现过的项目：github-center（踩到，已修）。
 - 升级：未升级。
+- 触发：`launchctl bootout`、`launchctl bootstrap`
