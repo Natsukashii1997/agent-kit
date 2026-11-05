@@ -1,9 +1,58 @@
 # agent-kit 第 1 件：不可逆操作「先问常浩」（Codex 执行策略规则）。
 # 由 tools/install.mjs 复制到 ~/.codex/rules/agent-kit.rules。规则按前缀匹配：
 # 只认写在最前面的参数，所以 `git push origin feature --force` 这种把 --force 写在最后的问不到，
-# 强推 main/master 另由 hooks/guard-git.mjs 直接拒绝。
+# 强推或删除 main/master：下面几条 forbidden 规则直接禁止（硬的一层），写法认不出的再由 hooks/guard-git.mjs 兜住。
 # 每条的 match / not_match 是加载时 Codex 自己会跑的例子，写错了 Codex 会报错，改完先跑：
 #   codex execpolicy check --rules config/codex/agent-kit.rules git push -f origin x
+
+# ---- 直接禁止：强推或删除 main/master（《工程流程》第 3 节）----
+
+prefix_rule(
+    pattern = ["git", "push", ["-f", "--force", "--force-with-lease"], ["origin", "upstream"], ["main", "master", "HEAD:main", "HEAD:master"]],
+    decision = "forbidden",
+    justification = "不 force push main（《工程流程》第 3 节）。要改 main 请走 PR；确有必要请常浩本人在终端里操作。",
+    match = ["git push --force origin main", "git push -f origin HEAD:master"],
+    not_match = ["git push --force origin feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["-f", "--force", "--force-with-lease"], ["main", "master", "HEAD:main", "HEAD:master"]],
+    decision = "forbidden",
+    justification = "不 force push main（《工程流程》第 3 节）。要改 main 请走 PR；确有必要请常浩本人在终端里操作。",
+    match = ["git push origin --force main"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["main", "master", "HEAD:main", "HEAD:master"], ["-f", "--force", "--force-with-lease"]],
+    decision = "forbidden",
+    justification = "不 force push main（《工程流程》第 3 节）。要改 main 请走 PR；确有必要请常浩本人在终端里操作。",
+    match = ["git push origin main --force"],
+    not_match = ["git push origin main"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["+main", "+master", "+HEAD:main", "+HEAD:master", ":main", ":master"]],
+    decision = "forbidden",
+    justification = "强推或删除远端 main/master。确有必要请常浩本人在终端里操作。",
+    match = ["git push origin +main", "git push origin :main"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["origin", "upstream"], ["--delete", "-d"], ["main", "master"]],
+    decision = "forbidden",
+    justification = "删除远端 main/master。确有必要请常浩本人在终端里操作。",
+    match = ["git push origin --delete main"],
+    not_match = ["git push origin --delete old"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["--delete", "-d"], ["origin", "upstream"], ["main", "master"]],
+    decision = "forbidden",
+    justification = "删除远端 main/master。确有必要请常浩本人在终端里操作。",
+    match = ["git push --delete origin master"],
+)
+
+# ---- 先问常浩 ----
 
 prefix_rule(
     pattern = ["gh", "pr", "merge"],

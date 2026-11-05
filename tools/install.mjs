@@ -48,12 +48,12 @@ export function mergeHooks(config, groups, { remove = false } = {}) {
   return out;
 }
 
-export function mergeAsk(settings, rules, { remove = false } = {}) {
+export function mergeRules(settings, key, rules, { remove = false } = {}) {
   const out = structuredClone(settings || {});
   out.permissions ||= {};
-  const cur = out.permissions.ask || [];
-  out.permissions.ask = remove ? cur.filter(r => !rules.includes(r)) : [...cur, ...rules.filter(r => !cur.includes(r))];
-  if (!out.permissions.ask.length) delete out.permissions.ask;
+  const cur = out.permissions[key] || [];
+  out.permissions[key] = remove ? cur.filter(r => !rules.includes(r)) : [...cur, ...rules.filter(r => !cur.includes(r))];
+  if (!out.permissions[key].length) delete out.permissions[key];
   if (!Object.keys(out.permissions).length) delete out.permissions;
   return out;
 }
@@ -120,11 +120,12 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
   if (doClaude) {
     const file = path.join(home, '.claude', 'settings.json');
     const before = readJson(file);
-    const ask = JSON.parse(fs.readFileSync(path.join(KIT, 'config', 'claude-permissions.json'), 'utf8')).ask;
-    const after = mergeHooks(mergeAsk(before, ask, { remove }), ourHookGroups('claude'), { remove });
-    const added = (after.permissions?.ask || []).filter(r => !(before.permissions?.ask || []).includes(r));
+    const { deny, ask } = JSON.parse(fs.readFileSync(path.join(KIT, 'config', 'claude-permissions.json'), 'utf8'));
+    const ruled = mergeRules(mergeRules(before, 'deny', deny, { remove }), 'ask', ask, { remove });
+    const after = mergeHooks(ruled, ourHookGroups('claude'), { remove });
+    const added = key => (after.permissions?.[key] || []).filter(r => !(before.permissions?.[key] || []).includes(r)).length;
     plan.push(`Claude Code：${file}`);
-    plan.push(remove ? '  去掉 agent-kit 的 permissions.ask 规则和 2 个 hook' : `  permissions.ask 新增 ${added.length} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind（旧的 agent-kit hook 先去掉）`);
+    plan.push(remove ? '  去掉 agent-kit 的 permissions.deny / ask 规则和 2 个 hook' : `  permissions.deny 新增 ${added('deny')} 条、permissions.ask 新增 ${added('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind（旧的 agent-kit hook 先去掉）`);
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
   }

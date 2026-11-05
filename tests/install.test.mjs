@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { isOurHook, main, mergeAsk, mergeHooks, ourHookGroups, selfTest } from '../tools/install.mjs';
+import { isOurHook, main, mergeHooks, mergeRules, ourHookGroups, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -34,10 +34,13 @@ test('合并 hook：保留别人的 hook，重复安装不会叠加', () => {
 
 test('合并先问规则：去重，卸载只去掉自己加的', () => {
   const start = { permissions: { allow: ['Bash(npm test)'], ask: ['Bash(rm *)'] } };
-  const once = mergeAsk(start, ['Bash(gh pr merge *)', 'Bash(rm *)']);
+  const once = mergeRules(start, 'ask', ['Bash(gh pr merge *)', 'Bash(rm *)']);
   assert.deepEqual(once.permissions.ask, ['Bash(rm *)', 'Bash(gh pr merge *)']);
-  assert.deepEqual(mergeAsk(once, ['Bash(gh pr merge *)']), once);
-  assert.deepEqual(mergeAsk(once, ['Bash(gh pr merge *)'], { remove: true }), start);
+  assert.deepEqual(mergeRules(once, 'ask', ['Bash(gh pr merge *)']), once);
+  assert.deepEqual(mergeRules(once, 'ask', ['Bash(gh pr merge *)'], { remove: true }), start);
+  const denied = mergeRules(once, 'deny', ['Bash(git push --force * main)']);
+  assert.deepEqual(denied.permissions.deny, ['Bash(git push --force * main)']);
+  assert.deepEqual(denied.permissions.allow, ['Bash(npm test)']);
 });
 
 test('自检能在本机跑通', () => {
@@ -61,6 +64,7 @@ test('整套安装：预览不写文件；--apply 写入并备份；--uninstall 
   assert.deepEqual(after.permissions.allow, ['Bash(npm test)']);
   assert.equal(after.autoMemoryEnabled, false);
   assert.ok(after.permissions.ask.includes('Bash(gh pr merge *)'));
+  assert.ok(after.permissions.deny.includes('Bash(git push --force * main)'));
   assert.equal(after.hooks.PreToolUse.length, 2);
   assert.ok(fs.readdirSync(path.dirname(settings)).some(f => f.startsWith('settings.json.bak-agent-kit-')));
   const codexHooks = JSON.parse(fs.readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8'));

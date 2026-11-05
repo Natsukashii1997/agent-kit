@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // 第 1 件：不可逆操作的硬闸（命令执行前的 hook，Claude Code 与 Codex 共用）。
 // 只做一件事：强推或删除 main / master 时直接拒绝（《工程流程》第 3 节「不 force push main」）。
-// 其余要「先问我」的操作（合并 PR、推 main、强推分支、reset --hard 等）交给权限规则：
-// Claude 用 config/claude-permissions.json，Codex 用 config/codex/agent-kit.rules。
+// Claude 那边第一层是 config/claude-permissions.json 的 deny 规则（不会出错放行）；这个 hook 兜住规则认不出的写法
+// （git -C、参数顺序打乱、组合短参数等），Codex 没有 deny 规则，只靠它。
+// 要「先问我」的操作（合并 PR、推 main、强推分支、reset --hard 等）交给权限规则：
+// Claude 用 config/claude-permissions.json 的 ask，Codex 用 config/codex/agent-kit.rules。
 // 出错时不拦（退出码 1，hook 默认放行），只往 stderr 写原因；`node tools/doctor.mjs` 会自检这个 hook。
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
