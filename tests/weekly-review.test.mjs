@@ -28,3 +28,20 @@ test('生成整份材料', () => {
   assert.match(text, /session-retro/);
 });
 
+
+test('再犯：两种写法都认，按坑汇总并附项目；没有就说明口径', async () => {
+  const { findRecurrences, summarizeRecurrence, lessonsFiles } = await import('../tools/weekly-review.mjs');
+  assert.deepEqual(findRecurrences('- 再犯：G-04、G-11\n说明 G-03 再犯了\n无关 G-05'), ['G-04', 'G-11', 'G-03']);
+  const out = summarizeRecurrence([{ project: 'a', text: '再犯：G-04' }, { project: 'b', text: 'G-04 再犯' }, { project: 'c', text: '' }], { 'G-04': '并行会话' });
+  assert.match(out.join('\n'), /\| G-04 并行会话 \| 2 \| a、b \|/);
+  assert.match(summarizeRecurrence([]).join('\n'), /没有标「再犯：G-xx」/);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-root-'));
+  fs.mkdirSync(path.join(root, 'p1', 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'p1', 'docs', 'LESSONS.md'), '再犯：G-01');
+  fs.mkdirSync(path.join(root, '_归档', 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, '_归档', 'docs', 'LESSONS.md'), '再犯：G-02');
+  assert.deepEqual(lessonsFiles(root).map(f => f.project), ['p1']);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-week2-'));
+  const { text } = build({ dir, now: Date.parse('2026-11-07T12:00:00Z'), workRoot: root });
+  assert.match(text, /## 3\. 再犯[\s\S]*G-01/);
+});

@@ -19,6 +19,7 @@ Claude 和 Codex 跨项目共用的协作底座：各项目里换个项目也成
 ## 怎么接入
 
 - `~/.claude/CLAUDE.md`「7. 跨项目沉淀」和 `~/.codex/AGENTS.md`「跨项目沉淀」各有一段同样的话指向这里。两段要一起改、保持一字不差。
+- 两份全局指令本身也在这里：`global/` 是仓库版，改动走 PR；个人上下文段留在本机状态目录 `personal/`，由 `tools/global-instructions.mjs` 拼装安装。详见 [docs/机器执行层.md](docs/机器执行层.md)。
 
 ## 怎么进化
 

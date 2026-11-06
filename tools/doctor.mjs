@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
+import { inspect } from './global-instructions.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -73,7 +74,8 @@ function checkHooks({ home, run, env, dir }) {
   const hookCmds = (settings.hooks?.PreToolUse || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
   const hasGuard = hookCmds.some(c => c.includes('hooks/guard-git.mjs'));
   const hasRemind = hookCmds.some(c => c.includes('hooks/lessons-remind.mjs'));
-  if (!missing.length && hasGuard && hasRemind) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则、${cfg.ask.length} 条先问规则、2 个 hook 都在`] });
+  const hasSkill = (settings.hooks?.PostToolUse || []).some(g => (g.hooks || []).some(h => (h.command || '').includes('hooks/skill-usage.mjs')));
+  if (!missing.length && hasGuard && hasRemind && hasSkill) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则、${cfg.ask.length} 条先问规则、3 个 hook 都在`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -82,6 +84,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(missing.length ? [`缺 ${missing.length} 条权限规则，例如 ${missing[0]}`] : []),
         ...(!hasGuard ? ['没装 guard-git'] : []),
         ...(!hasRemind ? ['没装 lessons-remind'] : []),
+        ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         '装法：node tools/install.mjs --apply',
       ],
     });
@@ -151,6 +154,22 @@ function checkInstructionSync({ home, env, config }) {
   return { name, status: 'fail', detail: [`第 ${at + 1} 行起不同`, `Claude：${la[at] ?? '（没有这一行）'}`, `Codex ：${lb[at] ?? '（没有这一行）'}`, '改成一样后再跑一次体检'] };
 }
 
+// 全局指令进 git（#13）：已装的 CLAUDE.md / AGENTS.md 应等于「仓库版 global/ + 本机个人段」。
+// 不一致多半是有人直接改了已装的文件：改动没进 PR、也没版本记录。
+function checkGlobalInstructions({ home, env, dir }) {
+  return inspect({ home, env, dir }).map(r => {
+    const name = `全局指令 ${r.tool} 与仓库版一致`;
+    if (r.status === 'same') return { name, status: 'ok', detail: [`${r.dest} = global/ 仓库版 + 个人段`] };
+    if (r.status === 'missing-personal') return { name, status: 'warn', detail: [`个人段缺 ${r.missing.join('、')}，应在 ${r.personal}`] };
+    if (r.status === 'no-base') return { name, status: 'warn', detail: ['仓库里没有 global/ 仓库版'] };
+    return {
+      name,
+      status: 'warn',
+      detail: [`${r.dest} 第 ${r.diff.line} 行起和仓库版不同`, `已装：${r.diff.installed}`, `仓库：${r.diff.composed}`, '改全局指令要改 global/ 走 PR，合并后在 main 上跑 node tools/global-instructions.mjs --apply；仓库不在 main 上时这条可以忽略'],
+    };
+  });
+}
+
 function checkAutoMemory({ home }) {
   const settings = jsonOr(readText(path.join(home, '.claude', 'settings.json')));
   const v = settings.autoMemoryEnabled;
@@ -217,6 +236,7 @@ export function runDoctor(deps = {}) {
   return [
     ...checkHooks(ctx),
     checkInstructionSync(ctx),
+    ...checkGlobalInstructions(ctx),
     checkAutoMemory(ctx),
     checkLessonHits(ctx),
     ...checkRepos(ctx),
