@@ -87,7 +87,7 @@
 - 正确做法：来源校验（Host 是本机、Origin 同源）、正文大小上限、统一错误响应放服务入口，对全部写接口生效；模块里只做自己的业务校验（如配对码）。
 - 来源：work-desk L-11（`server/http.mjs` 的 `checkOrigin`、`tests/request-guard.test.mjs`）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 origin 规则（开了 `.listen(` 的文件里找不到 Origin/Host 校验就报），见 my-skills 对应 PR。
+- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 origin 规则（开了 `.listen(` 的文件里找不到 Origin/Host 校验就报），见 my-skills#49 / PR #50。
 - 触发：`.listen(`、`createServer(`
 
 ## G-08 `set -u` 脚本里可选开关裸引用，变量不设就整段退出（2026-10-24 提升）
@@ -97,7 +97,7 @@
 - 正确做法：可选开关一律写 `${OPT:-}`；改带 `set -u` 的脚本后，开关设与不设各跑一遍。
 - 来源：work-desk L-12（`~/Library/Application Support/NiumaHome/evidence/全面优化-20261023/release.log`；修复提交 `359ac18`）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 optional-var 规则（带 `set -u` 的脚本里 `[ -n "$X" ]` / `[ -z "$X" ]` 没写 `${X:-}` 就报），见 my-skills 对应 PR。
+- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 optional-var 规则（带 `set -u` 的脚本里 `[ -n "$X" ]` / `[ -z "$X" ]` 没写 `${X:-}` 就报），见 my-skills#49 / PR #50。
 - 触发：`/\bset -[a-z]*u/`
 
 ## G-09 改界面时把原有强调色、状态样式改没了（2026-10-24 提升）
@@ -169,7 +169,7 @@
   - 巡检规则的自测要覆盖“只有已处理记录”这种情况，不只测空列表和有问题两种。
 - 来源：digital-twin 2026-10-28（`CURRENT.md`「首日运行核对；巡检定时任务误报修复」一节；修复 PR #24 `38a8b7e`）。
 - 出现过的项目：digital-twin。
-- 升级：部分升级（2026-11-07，#15）：数字分身每日巡检会报未处理的失败记录，但不区分是否属于已删除的任务；补这一项另开 digital-twin issue。
+- 升级：部分升级（2026-11-07，#15）：数字分身每日巡检会报未处理的失败记录，但不区分是否属于已删除的任务；补这一项见 digital-twin#62。
 - 触发：`hermes cron`
 
 ## G-15 改了 Safari「添加到程序坞」网页应用的包内文件再重签，应用打不开（2026-10-28 新增）
