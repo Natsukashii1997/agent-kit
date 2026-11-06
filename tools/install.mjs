@@ -5,7 +5,7 @@
 //   node tools/install.mjs --uninstall [--apply]   去掉 agent-kit 加的东西，别的设置原样保留
 //   --only claude | --only codex      只装一边
 //   --allow-any-branch                允许不在 main 上装（只给测试和有意为之时用）
-// 改的文件：~/.claude/settings.json（permissions.deny / ask 和 hooks.PreToolUse）、
+// 改的文件：~/.claude/settings.json（permissions.deny / ask、hooks.PreToolUse 和 hooks.PostToolUse 里的 skill-usage）、
 //          ~/.codex/hooks.json（hooks.PreToolUse）、~/.codex/rules/agent-kit.rules。
 // 写之前把原文件备份到状态目录 backups/<时间>/；hook 脚本和 LESSONS.md 复制到状态目录 runtime/ 再指向那里，
 // 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs'];
+const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs'];
 const TIMEOUT_SEC = 10;
 
 export const isOurHook = h => typeof h?.command === 'string' && HOOK_FILES.some(f => h.command.includes(`hooks/${f}`));
@@ -40,15 +40,21 @@ export function ourHookGroups(tool, node = stableNode(), base = KIT) {
   ];
 }
 
-// 去掉已有的 agent-kit hook（别人的 hook 原样保留），再按需加上新的
-export function mergeHooks(config, groups, { remove = false } = {}) {
+// 调用后记账的 hook（PostToolUse）：目前只有 Claude 的 skill 调用日志；Codex 没有 Skill 工具，由 my-skills 月度体检读会话记录补
+export function ourPostGroups(tool, node = stableNode(), base = KIT) {
+  if (tool !== 'claude') return [];
+  return [{ matcher: 'Skill', hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'skill-usage.mjs')}"`, timeout: TIMEOUT_SEC }] }];
+}
+
+// 去掉某个事件下已有的 agent-kit hook（别人的 hook 原样保留），再按需加上新的
+export function mergeHooks(config, groups, { remove = false, event = 'PreToolUse' } = {}) {
   const out = structuredClone(config || {});
   out.hooks ||= {};
-  const kept = (out.hooks.PreToolUse || [])
+  const kept = (out.hooks[event] || [])
     .map(g => ({ ...g, hooks: (g.hooks || []).filter(h => !isOurHook(h)) }))
     .filter(g => g.hooks.length);
-  out.hooks.PreToolUse = remove ? kept : [...kept, ...groups];
-  if (!out.hooks.PreToolUse.length) delete out.hooks.PreToolUse;
+  out.hooks[event] = remove ? kept : [...kept, ...groups];
+  if (!out.hooks[event].length) delete out.hooks[event];
   if (!Object.keys(out.hooks).length) delete out.hooks;
   return out;
 }
@@ -90,6 +96,8 @@ export function selfTest(base = KIT, node = process.execPath) {
   if (g.status !== 0 || !String(g.stdout).includes('"deny"')) problems.push(`guard-git 没拦下强推 main（退出码 ${g.status}，${g.stderr || g.stdout}）`);
   const r = run('lessons-remind.mjs', { session_id: 'selftest', tool_name: 'Bash', tool_input: { command: 'launchctl bootstrap gui/501 x.plist' } });
   if (r.status !== 0 || !String(r.stdout).includes('G-05')) problems.push(`lessons-remind 没对 launchctl 给出 G-05 提醒（退出码 ${r.status}，${r.stderr || r.stdout}）`);
+  const s = run('skill-usage.mjs', { session_id: 'selftest', tool_name: 'Skill', tool_input: { skill: 'selftest' } });
+  if (s.status !== 0) problems.push(`skill-usage 跑不起来（退出码 ${s.status}，${s.stderr || s.stdout}）`);
   return problems;
 }
 
@@ -99,8 +107,8 @@ export function branchProblem(kit = KIT) {
   const br = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (br.status !== 0) return '这个目录不是 git 仓库，认不出是不是 main 上的版本';
   if (br.stdout.trim() !== 'main') return `当前在 ${br.stdout.trim()} 分支上，不是 main`;
-  const dirty = git(['status', '--porcelain', '--', 'hooks', 'config', 'LESSONS.md']).stdout.trim();
-  if (dirty) return `hooks/、config/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
+  const dirty = git(['status', '--porcelain', '--', 'hooks', 'config', 'global', 'LESSONS.md']).stdout.trim();
+  if (dirty) return `hooks/、config/、global/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
   return null;
 }
 
@@ -142,7 +150,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒。');
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑。');
     plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
@@ -164,13 +172,14 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       }
     }
     after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
+    after = mergeHooks(after, ourPostGroups('claude', stableNode(), runtime), { remove, event: 'PostToolUse' });
     plan.push(`Claude Code：${file}`);
     if (remove) {
-      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 2 个 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 2 个 hook）');
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 3 个 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 3 个 hook）');
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、permissions.ask 新增 ${n('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind（旧的 agent-kit hook 先去掉）`);
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、permissions.ask 新增 ${n('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind，hooks.PostToolUse 放入 skill-usage（旧的 agent-kit hook 先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
