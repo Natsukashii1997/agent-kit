@@ -239,3 +239,18 @@
 - 出现过的项目：Hermes 本机网关（踩到 2 次，都已修；第 2 次见 #17，改前备份 `~/.hermes/backups/ai.hermes.gateway.plist.bak-20261107`，`.env` 备份在同一目录）。
 - 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`HTTPS_PROXY`、`https_proxy`、`EnvironmentVariables`、`gateway install`
+
+## G-20 Mac 睡眠时定时任务照样“在跑”，但慢到被自己的超时或租约强制中断（2026-11-07 新增）
+
+- 现象：每周一 07:45 的 Hermes 周报定时任务晚了半小时才派发，跑起来后每次调用模型都显示等 5–7 分钟（模型实际只回几十个字），最后一次等了 934 秒，报 `Operation interrupted: waiting for model response` 失败；日志里紧挨着一行 `Session turn lease refresh stayed locked through its lifetime`。同一周的日报第一次调用模型也等了 15–17 分钟，只是调用次数少，侥幸跑完。看起来像模型服务或网络抽风，换个时间手动跑又一切正常。
+- 根因：Mac 当时用电池（电量 10%）处于睡眠，只在系统每隔约 5 分钟的维护唤醒（`DarkWake`）里醒几秒。进程只在这几秒里往前走，于是每次网络请求、每次计时都被拉长到几分钟；框架给会话的租约每 300 秒要续一次，睡眠期间续不上，过期后框架为保护对话记录强制中断。这台机器的电源设置是插电不睡、用电池 1 分钟没操作就睡，所以只在没插电的早上出事。
+- 正确做法：
+  - 定时任务报超时、调用耗时成倍变长、派发明显晚点时，先看失败时段机器醒没醒：`pmset -g log | grep -E "^<日期> <小时>:" | grep -E "Sleep|Wake|DarkWake"`，有成串的 `DarkWake` / `Maintenance Sleep` 就是在睡，不用再查模型和网络。
+  - 当前电源设置看 `pmset -g custom`（分电池、插电两套），定时唤醒看 `pmset -g sched`。
+  - 要在固定时间可靠跑完的任务，要求那个时间机器插着电、没合盖；做不到时由用户自己设定时唤醒（如 `sudo pmset repeat wakeorpoweron M 07:40:00`，改系统设置要用户亲手执行），但电量低时唤醒后很快又会睡，插电仍是最稳的办法。
+  - 交给智能体跑的长任务尽量减少来回调用次数：同样被睡眠拖慢，调用少的任务能跑完，调用多的会撞上租约或超时。
+  - 失败后别只等下一期：这一期漏掉的产出要么补跑，要么在记录里写明不补，避免以为已经有了。
+- 来源：Hermes 本机定时任务 2026-11-02（本机服务，没有项目仓库；`~/.hermes/logs/agent.log` 当天 08:30–09:14 的 API 调用耗时与租约中断记录，`~/.hermes/cron/output/6a976baa2632/2026-11-02_09-14-00.md`，`pmset -g log` 当天 07:00–09:14 的睡眠记录；租约时长见 `hermes-agent/agent/turn_facade_lease.py` 的 `LEASE_TTL_SECONDS = 300`）。agent-kit#31。
+- 出现过的项目：Hermes 本机定时任务。
+- 升级：未升级。可选去处：本机体检（my-skills 的 automation-checkup）在报定时任务失败时，顺带查失败时段的 `pmset` 睡眠记录，直接说明“当时机器在睡”。
+- 触发：`pmset`、`DarkWake`、`/waiting for model response/`、`/turn lease/`
