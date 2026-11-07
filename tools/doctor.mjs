@@ -75,7 +75,9 @@ function checkHooks({ home, run, env, dir }) {
   const hasGuard = hookCmds.some(c => c.includes('hooks/guard-git.mjs'));
   const hasRemind = hookCmds.some(c => c.includes('hooks/lessons-remind.mjs'));
   const hasSkill = (settings.hooks?.PostToolUse || []).some(g => (g.hooks || []).some(h => (h.command || '').includes('hooks/skill-usage.mjs')));
-  if (!missing.length && hasGuard && hasRemind && hasSkill) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、3 个 hook 都在`] });
+  const promptCmds = (settings.hooks?.UserPromptSubmit || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
+  const hasNudge = hookCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs')) && promptCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs'));
+  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、4 个 hook 都在`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -85,6 +87,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasGuard ? ['没装 guard-git'] : []),
         ...(!hasRemind ? ['没装 lessons-remind'] : []),
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
+        ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
         '装法：node tools/install.mjs --apply',
       ],
     });
@@ -201,6 +204,41 @@ function checkLessonHits({ now, dir }) {
   };
 }
 
+// thinking-review 三层分开看（#35）：钩子提醒了几个会话 → 其中几个调用了 skill → 几个真的发起了「思维评审｜」接力。
+// 提醒了没调用不一定是漏：判成 B / C 本来就不用调用、不用送。这里只给数，漏没漏要回会话里看。
+export const HANDOFFS_FILE = home => path.join(home, 'Library', 'Application Support', 'app.postpane.mac', 'chatgpt', 'handoffs.json');
+
+function checkThinkingReview({ now, dir, home, env }) {
+  const since = now - 7 * 864e5;
+  const rows = file =>
+    (readText(path.join(dir, file)) || '').split('\n').flatMap(l => {
+      try {
+        const r = JSON.parse(l);
+        return Date.parse(r.time) >= since ? [r] : [];
+      } catch {
+        return [];
+      }
+    });
+  const nudges = rows('thinking-review-nudges.jsonl');
+  const nudged = new Set(nudges.filter(r => r.nudged).map(r => r.session));
+  const signals = {};
+  for (const r of nudges.filter(r => r.nudged)) signals[r.signal] = (signals[r.signal] || 0) + 1;
+  const judged = new Set(rows('skill-usage.jsonl').filter(r => /thinking-review$/.test(r.skill || '')).map(r => r.session));
+  const handoffs = jsonOr(readText(env.POSTPANE_HANDOFFS || HANDOFFS_FILE(home)));
+  const relayed = new Set((Array.isArray(handoffs) ? handoffs : []).filter(h => String(h.title || '').startsWith('思维评审｜') && Number(h.createdAt) >= since).map(h => h.claudeSession));
+  const inter = (a, b) => [...a].filter(x => b.has(x)).length;
+  const off = fs.existsSync(path.join(dir, 'thinking-review-nudge.off'));
+  return {
+    name: '近 7 天思维评审触发',
+    status: 'info',
+    detail: [
+      ...(off ? ['准入提醒已手动关闭（删掉状态目录里的 thinking-review-nudge.off 恢复）'] : []),
+      `钩子提醒 ${nudged.size} 个会话${Object.keys(signals).length ? `（${Object.entries(signals).map(([k, n]) => `${k}×${n}`).join('、')}）` : ''}；其中调用了 thinking-review ${inter(nudged, judged)} 个，发起接力 ${inter(nudged, relayed)} 个`,
+      `全部会话：调用 thinking-review ${judged.size} 个，发起「思维评审｜」接力 ${relayed.size} 个`,
+    ],
+  };
+}
+
 function checkRepos({ config, run }) {
   return (config.repos || []).map(repo => {
     const name = `仓库 ${path.basename(repo)}`;
@@ -239,6 +277,7 @@ export function runDoctor(deps = {}) {
     ...checkGlobalInstructions(ctx),
     checkAutoMemory(ctx),
     checkLessonHits(ctx),
+    checkThinkingReview(ctx),
     ...checkRepos(ctx),
   ];
 }

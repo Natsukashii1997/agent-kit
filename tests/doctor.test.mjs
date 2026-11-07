@@ -110,3 +110,36 @@ test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失
   const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
   assert.equal(byName(res, 'hook 实跑自检').status, 'fail');
 });
+
+test('思维评审三层分开计数：提醒的会话、其中调用 skill 的、其中发起接力的', () => {
+  const home = fakeHome({ installed: false });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const now = Date.parse('2026-11-07T12:00:00Z');
+  const t = h => new Date(now - h * 3600e3).toISOString();
+  const jsonl = rows => `${rows.map(r => JSON.stringify(r)).join('\n')}\n`;
+  fs.writeFileSync(path.join(dir, 'thinking-review-nudges.jsonl'), jsonl([
+    { time: t(1), session: 'a', event: 'prompt', signal: 'handoff', nudged: true },
+    { time: t(1), session: 'a', event: 'edit', signal: 'first-edit', nudged: false, skip: 'judged' },
+    { time: t(2), session: 'b', event: 'edit', signal: 'first-edit', nudged: true },
+    { time: t(3), session: 'c', event: 'prompt', signal: 'asked', nudged: true },
+    { time: t(24 * 9), session: 'old', event: 'prompt', signal: 'handoff', nudged: true },
+  ]));
+  fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), jsonl([
+    { time: t(1), session: 'a', skill: 'thinking-review' },
+    { time: t(3), session: 'c', skill: 'thinking-review' },
+    { time: t(3), session: 'd', skill: 'other' },
+  ]));
+  const handoffs = path.join(dir, 'handoffs.json');
+  fs.writeFileSync(handoffs, JSON.stringify([
+    { title: '思维评审｜x｜y', claudeSession: 'a', createdAt: String(now - 3600e3) },
+    { title: '驿窗｜工程审查', claudeSession: 'b', createdAt: String(now - 3600e3) },
+  ]));
+  const r = byName(runDoctor({ home, env: { POSTPANE_HANDOFFS: handoffs }, dir, run: realRun, config: {}, now }), '近 7 天思维评审触发');
+  assert.equal(r.status, 'info');
+  assert.match(r.detail[0], /钩子提醒 3 个会话（handoff×1、first-edit×1、asked×1）；其中调用了 thinking-review 2 个，发起接力 1 个/);
+  assert.match(r.detail[1], /调用 thinking-review 2 个，发起「思维评审｜」接力 1 个/);
+
+  fs.writeFileSync(path.join(dir, 'thinking-review-nudge.off'), '');
+  const off = byName(runDoctor({ home, env: { POSTPANE_HANDOFFS: handoffs }, dir, run: realRun, config: {}, now }), '近 7 天思维评审触发');
+  assert.match(off.detail[0], /已手动关闭/);
+});
