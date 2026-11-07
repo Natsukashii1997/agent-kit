@@ -254,3 +254,16 @@
 - 出现过的项目：Hermes 本机定时任务。
 - 升级：未升级。可选去处：本机体检（my-skills 的 automation-checkup）在报定时任务失败时，顺带查失败时段的 `pmset` 睡眠记录，直接说明“当时机器在睡”。
 - 触发：`pmset`、`DarkWake`、`/waiting for model response/`、`/turn lease/`
+
+## G-21 从程序里跳去本机另一个应用，用 https 链接被默认浏览器在后台接走，目标应用不出来（2026-11-07 提升）
+
+- 现象：程序里给一行加了「点一下跳到某应用里的某个聊天 / 文档」，自查页里点击送出的参数全对，实机点了却「没反应」：前台还是原来的应用，目标应用没出来。
+- 根因：跳转用的是那个应用官方的 https 链接（如 `https://applink.feishu.cn/client/chat/open?openChatId=…`），`open` 把它交给系统默认浏览器（这台是 Chrome），浏览器在后台开了个标签页，目标应用根本没被叫起来。同一个应用注册的不同协议表现也不同：飞书的 `lark://` 也没把它叫到前台，`feishu://applink.feishu.cn/…` 才会，并且打开到了对的聊天。只看「送出了什么」的测试验不出这一层。
+- 正确做法：
+  - 跳去本机应用，优先用它自己注册的协议：查 `plutil -extract CFBundleURLTypes json -o - "/Applications/<应用>.app/Contents/Info.plist"` 里的 `CFBundleURLSchemes`，挨个用 `open "<协议>://…"` 试，选能把应用叫到前台并打开到位的那个。
+  - 代码里先确认这个协议有人认领（macOS 用 `LSCopyDefaultApplicationURLForURL`），没装这个应用时才退回 https 链接。
+  - 验收「跳转」要看目标应用有没有到前台、打开到哪里：`osascript -e 'tell application "System Events" to get frontmost of (first process whose bundle identifier is "<bundle id>")'` 看到前台；打开到哪个页面请用户目视，或拿到该应用的截图授权。
+- 来源：postpane L-22（`docs/LESSONS.md`，#198；本机三次实测：`open https://…`、`open lark://…` 后前台仍是原应用，`open feishu://…` 后飞书 `frontmost` 为 `true`，常浩确认打开的是那个群）。
+- 出现过的项目：postpane。
+- 升级：未升级。
+- 触发：`applink`、`CFBundleURLSchemes`、`LSCopyDefaultApplicationURLForURL`、`/deep ?link/`
