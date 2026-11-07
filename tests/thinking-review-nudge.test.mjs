@@ -55,7 +55,6 @@ test('后台事件、会话间通知、斜杠命令不提醒', () => {
   assert.equal(sig('[SYSTEM NOTIFICATION - NOT USER INPUT] 思维评审'), null);
   assert.equal(sig('/thinking-review 这个方案'), null);
   assert.equal(sig(`This session is being continued from a previous conversation that ran out of context.\n${plan()}`), null, '压缩后的续接摘要');
-  assert.equal(sig(`Background (from the session that started this one):\n${plan()}`), null, '别的会话派来的任务说明');
   assert.equal(sig(`The agent-hud plugin sent a message.\n${plan()}`), null, '驿窗转回的 GPT 回信');
   assert.equal(sig(`<command-message>to-spec</command-message>\n${plan()}`), null, '斜杠命令展开');
   assert.equal(sig(''), null);
@@ -128,21 +127,72 @@ test('作为 hook 真跑：提醒格式对、只提醒不做决定、同一节�
   assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: plan() }), null, '同一份方案第二次不提醒');
   assert.ok(run({ hook_event_name: 'UserPromptSubmit', prompt: plan('（V3）') }), '新的一份方案再提醒');
 
+  // 收到过交来方案、还没判断：第一次改文件拦一次（只拦这一次），之后照常放行、不再提醒
   const edit = { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: '/x/proj/a.ts', content: 'secret' } };
   const first = run(edit);
   assert.equal(first.hookEventName, 'PreToolUse');
-  assert.match(first.additionalContext, /第一次改项目文件/);
-  assert.equal(first.permissionDecision, undefined);
+  assert.equal(first.permissionDecision, 'deny');
+  assert.match(first.permissionDecisionReason, /只拦这一次/);
   assert.equal(run(edit), null);
   assert.equal(run({ ...edit, tool_name: 'Edit', tool_input: { file_path: '/x/proj/b.ts' } }), null);
 
   const rows = log();
   assert.deepEqual(rows.map(r => [r.event, r.signal, r.nudged]), [
     ['prompt', 'handoff', true], ['prompt', 'handoff', false], ['prompt', 'handoff', true],
-    ['edit', 'first-edit', true], ['edit', 'first-edit', false], ['edit', 'first-edit', false],
+    ['edit', 'gate', true], ['edit', 'first-edit', false], ['edit', 'first-edit', false],
   ]);
   const raw = JSON.stringify(rows);
   assert.ok(!raw.includes('知识库') && !raw.includes('secret') && !raw.includes('a.ts'), '记录里不留提示词、文件内容和路径');
+});
+
+test('普通会话（没有高风险信号）：第一次改文件只提醒、不拦，并写明改动已经执行', () => {
+  const { run } = harness();
+  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
+  const first = run(edit);
+  assert.equal(first.permissionDecision, undefined);
+  assert.match(first.additionalContext, /这次改动已经执行/);
+  assert.equal(run(edit), null);
+});
+
+test('高风险候选的拦截：已调用 skill 不拦；常浩说了直接开工不拦；点名、质疑方向也算高风险', () => {
+  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
+  {
+    const { dir, session, run } = harness();
+    run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
+    fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), `${JSON.stringify({ time: 't', session, skill: 'thinking-review' })}\n`);
+    assert.equal(run(edit), null, '已判断：不拦也不提醒');
+  }
+  {
+    const { run } = harness();
+    run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
+    run({ hook_event_name: 'UserPromptSubmit', prompt: '直接开工' });
+    const r = run(edit);
+    assert.equal(r.permissionDecision, undefined, '直接开工：不拦，只提醒');
+  }
+  for (const prompt of ['这个思维评审一下', '我觉得方向不对']) {
+    const { run } = harness();
+    run({ hook_event_name: 'UserPromptSubmit', prompt });
+    assert.equal(run(edit).permissionDecision, 'deny', prompt);
+  }
+});
+
+test('别的会话派来的任务：有上游依据就继承，没有就提醒；同一份重复派来只提醒一次', () => {
+  const brief = (extra = '') => `Background (from the session that started this one):\n${plan()}${extra}`;
+  assert.equal(sig(brief()), 'delegated', '缺继承证据');
+  assert.equal(sig(`Please carry out this task for me.\n${plan()}`), 'delegated');
+  assert.equal(sig(brief('\n准入：C｜按 V3.0 执行')), 'inherited', '带准入四行');
+  assert.equal(sig(brief('\n评审出口：成熟退出')), 'inherited', '带评审出口');
+  assert.equal(sig(brief('\n决策记录：docs/decisions/2026-11-07-sync.md')), 'inherited', '带决策记录文件');
+  assert.equal(sig('Task (from the session that started this one): 把按钮改成蓝色'), null, '短任务不算方案');
+
+  const { run, log } = harness();
+  const first = run({ hook_event_name: 'UserPromptSubmit', prompt: brief() });
+  assert.match(first.additionalContext, /派来的方案类任务/);
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: brief() }), null, '重复通知');
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: brief('\n准入：C｜按 V3.0 执行') }), null, '有效继承');
+  assert.deepEqual(log().map(r => [r.signal, r.skip ?? 'nudged']), [['delegated', 'nudged'], ['delegated', 'seen'], ['inherited', 'inherited']]);
+  const e = run({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } });
+  assert.equal(e.permissionDecision, undefined, '派来的任务只提醒、不拦');
 });
 
 test('本会话已调用过 thinking-review：动手前两个节点不再提醒，新方案照样提醒', () => {
