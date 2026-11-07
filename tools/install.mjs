@@ -32,10 +32,10 @@ export function stableNode(execPath = process.execPath, exists = fs.existsSync) 
 }
 
 export function ourHookGroups(tool, node = stableNode(), base = KIT) {
-  const cmd = (file, extra = '') => `"${node}" "${path.join(base, 'hooks', file)}"${extra}`;
+  const cmd = file => `"${node}" "${path.join(base, 'hooks', file)}"`;
   const remindMatcher = tool === 'claude' ? 'Bash|Edit|Write|MultiEdit|NotebookEdit' : 'Bash|apply_patch|Edit|Write';
   return [
-    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs', tool === 'codex' ? ' --agent=codex' : ''), timeout: TIMEOUT_SEC }] },
+    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs'), timeout: TIMEOUT_SEC }] },
     { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd('lessons-remind.mjs'), timeout: TIMEOUT_SEC }] },
   ];
 }
@@ -166,9 +166,11 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       const mine = manifest.claude?.[key] || [];
       if (remove) after = mergeRules(after, key, mine, { remove: true });
       else {
-        after = mergeRules(after, key, cfg[key]);
+        // 以前装时加的、配置里已经去掉的规则，重装时一并去掉
+        const dropped = mine.filter(r => !cfg[key].includes(r));
+        after = mergeRules(mergeRules(after, key, dropped, { remove: true }), key, cfg[key]);
         // 记下「这次新加的」加上「以前装时加的、现在还在的」；你原来就有的同名规则不算
-        nextManifest.claude[key] = [...new Set([...mine.filter(r => had.includes(r)), ...cfg[key].filter(r => !had.includes(r))])];
+        nextManifest.claude[key] = [...new Set([...mine.filter(r => had.includes(r) && !dropped.includes(r)), ...cfg[key].filter(r => !had.includes(r))])];
       }
     }
     after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
@@ -179,7 +181,8 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、permissions.ask 新增 ${n('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind，hooks.PostToolUse 放入 skill-usage（旧的 agent-kit hook 先去掉）`);
+      const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind，hooks.PostToolUse 放入 skill-usage（旧的 agent-kit hook 先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');

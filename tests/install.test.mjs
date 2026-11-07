@@ -77,8 +77,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   const after = JSON.parse(fs.readFileSync(settings, 'utf8'));
   assert.deepEqual(after.permissions.allow, ['Bash(npm test)']);
   assert.equal(after.autoMemoryEnabled, false);
-  assert.ok(after.permissions.ask.includes('Bash(gh pr merge *)'));
-  assert.ok(after.permissions.ask.includes('mcp__github__merge_pull_request'));
+  assert.deepEqual(after.permissions.ask, ['Bash(git reset --hard *)'], '#27 起不加先问规则，原有的不动');
   assert.ok(after.permissions.deny.includes('Bash(git push --force * main)'));
   assert.equal(after.hooks.PreToolUse.length, 2);
   const cmds = after.hooks.PreToolUse.flatMap(g => g.hooks);
@@ -90,7 +89,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   const manifest = JSON.parse(fs.readFileSync(path.join(state, 'install-manifest.json'), 'utf8'));
   assert.ok(!manifest.claude.ask.includes('Bash(git reset --hard *)'), '原有的同名规则不记成自己加的');
   const codexHooks = JSON.parse(fs.readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8'));
-  assert.ok(codexHooks.hooks.PreToolUse[0].hooks[0].command.endsWith('--agent=codex'));
+  assert.ok(codexHooks.hooks.PreToolUse[0].hooks[0].command.endsWith('guard-git.mjs"'));
   assert.ok(fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
 
   // 装好的 hook 照设置里的命令原样跑得起来
@@ -106,6 +105,19 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.deepEqual(fs.readdirSync(path.join(home, '.codex', 'rules')), [], '规则目录里不留备份');
   assert.ok(!fs.existsSync(path.join(state, 'runtime')));
   assert.ok(!fs.existsSync(path.join(state, 'install-manifest.json')));
+});
+
+test('重装：以前装时加的、配置里已去掉的先问规则一并去掉，你自己的不动', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const settings = path.join(home, '.claude', 'settings.json');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ permissions: { ask: ['Bash(rm *)', 'Bash(gh pr merge *)', 'Bash(git clean *)'] } }));
+  fs.writeFileSync(path.join(state, 'install-manifest.json'), JSON.stringify({ claude: { deny: [], ask: ['Bash(gh pr merge *)', 'Bash(git clean *)'] } }));
+  assert.equal(quiet(() => main(['--apply', '--only', 'claude', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: state })), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')).permissions.ask, ['Bash(rm *)']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, 'install-manifest.json'), 'utf8')).claude.ask, []);
 });
 
 test('settings.json 坏了：不写，报错', () => {

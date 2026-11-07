@@ -1,5 +1,5 @@
 {
-  "说明": "第 1 件：不可逆操作机器把关。由 tools/install.mjs 合并进 ~/.claude/settings.json 的 permissions.deny / permissions.ask。deny：强推或删除 main/master，直接拒绝；权限规则不会「出错放行」，是硬的一层，hooks/guard-git.mjs 再兜住这些写法认不出的情况（git -C、参数顺序打乱等）。ask：先问常浩；官方文档说明 ask 规则在自动模式下也会弹出确认，复合命令里任何一段命中都会问。 mcp__github__merge_pull_request 是 GitHub MCP 的合并工具（MCP 工具的规则写工具全名、不带括号）。当前在 main 上、没写分支名的 git push 规则认不出，由 hooks/guard-git.mjs 改成先问。",
+  "说明": "第 1 件：不可逆操作机器把关。由 tools/install.mjs 合并进 ~/.claude/settings.json 的 permissions.deny。deny：强推或删除 main/master，直接拒绝，任何权限模式下都生效；权限规则不会「出错放行」，是硬的一层，hooks/guard-git.mjs 再兜住这些写法认不出的情况（git -C、参数顺序打乱等）。ask 为空：Claude 侧不再先问，决定与理由见 docs/机器执行层.md 第 1 件（#27）。",
   "deny": [
     "Bash(git push --force * main)",
     "Bash(git push --force * master)",
@@ -18,29 +18,5 @@
     "Bash(git push * :main)",
     "Bash(git push * :master)"
   ],
-  "ask": [
-    "Bash(gh pr merge *)",
-    "mcp__github__merge_pull_request",
-    "Bash(gh api */merge *)",
-    "Bash(gh api */merge)",
-    "Bash(git push --force *)",
-    "Bash(git push -f *)",
-    "Bash(git push * --force)",
-    "Bash(git push * --force *)",
-    "Bash(git push * -f)",
-    "Bash(git push * -f *)",
-    "Bash(git push * main)",
-    "Bash(git push * main *)",
-    "Bash(git push * master)",
-    "Bash(git push * master *)",
-    "Bash(git push *:main)",
-    "Bash(git push *:master)",
-    "Bash(git push --delete *)",
-    "Bash(git push * --delete *)",
-    "Bash(git reset --hard *)",
-    "Bash(git clean *)",
-    "Bash(git branch -D *)",
-    "Bash(git stash drop *)",
-    "Bash(git stash clear *)"
-  ]
+  "ask": []
 }
