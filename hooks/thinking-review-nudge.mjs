@@ -2,7 +2,8 @@
 // thinking-review 准入提醒（#35，thinking-review 1.1.0）：在几个关键节点提醒 Claude 先按 thinking-review 判断
 // 当前问题属于 A / B / A+B / C。只提醒，不判断、不拦截，也不调用驿窗接力；判断交给 skill，送不送由 Claude 定。
 //   UserPromptSubmit：像是交来一份已形成的方案（长文 + 方案类字眼），或常浩点名要思维评审、质疑方向时
-//   PreToolUse Edit/Write 类：本会话第一次改项目文件前（常浩基本不用计划模式，这才是「准备动手」的节点）
+//   PreToolUse Edit/Write 类和 Bash 里的写文件（sed -i、重定向、tee……）：本会话第一次改项目文件前
+//     （常浩基本不用计划模式，这才是「准备动手」的节点）
 //   PreToolUse ExitPlanMode：退出计划模式前
 // 用本机规则判断，不调模型、不外发；记录只写时间、会话、节点、信号编码，不写提示词和文件内容。
 // 同一会话同一节点只提醒一次，同一份方案只提醒一次；本会话已经调用过 thinking-review 的，不再提醒动手前的两个节点。
@@ -57,6 +58,27 @@ export function isScratchPath(file, home = os.homedir(), tmp = os.tmpdir()) {
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
+// Bash 里改文件：跳过权限确认模式下 Claude 常用 sed -i、重定向、tee、python 脚本改文件，不走 Edit 工具（实测 S4 就是这样）。
+// 返回命令里能认出的写入目标；认不出目标但明显在写文件（git apply、patch、python 脚本里 write）时返回 ['']。
+export function bashWriteTargets(command) {
+  const cmd = String(command || '');
+  const targets = [];
+  for (const m of cmd.matchAll(/(?:^|[\s;|&(])(?:\d?>>?|&>>?)\s*([^\s;|&<>()]+)/g)) {
+    const t = m[1].replace(/^["']|["']$/g, '');
+    if (t.startsWith('&') || t === '/dev/null' || t.startsWith('/dev/')) continue;
+    targets.push(t);
+  }
+  for (const m of cmd.matchAll(/\btee\s+(?:-a\s+)?([^\s;|&<>()]+)/g)) targets.push(m[1].replace(/^["']|["']$/g, ''));
+  const inPlace = cmd.match(/\b(?:sed|perl)\s+(?:-[a-zA-Z]*i\b|-i\s|--in-place)[^;|&\n]*/);
+  if (inPlace) {
+    const last = inPlace[0].trim().split(/\s+/).pop().replace(/^["']|["']$/g, '');
+    targets.push(last && !last.startsWith('-') && !/^s[/|#]/.test(last) ? last : '');
+  }
+  if (/\bgit\s+apply\b|(?:^|[\s;&|])patch\s+-p\d/.test(cmd)) targets.push('');
+  if (/\bpython3?\b[^\n]*<</.test(cmd) && /\.write(?:_text)?\(|open\([^)]*,\s*(?:mode\s*=\s*)?['"][wa]/.test(cmd)) targets.push('');
+  return targets;
+}
+
 // 从 hook 输入得出这一次是什么节点：{ event, signal, key }，不是检查节点返回 null
 export function classify(input) {
   const ev = input?.hook_event_name;
@@ -70,6 +92,13 @@ export function classify(input) {
   if (ev === 'PreToolUse' && EDIT_TOOLS.has(input.tool_name)) {
     const file = input.tool_input?.file_path || input.tool_input?.notebook_path;
     if (isScratchPath(file)) return null;
+    return { event: 'edit', signal: 'first-edit', key: 'first-edit' };
+  }
+  if (ev === 'PreToolUse' && input.tool_name === 'Bash') {
+    const base = input.cwd || process.cwd();
+    // 写到草稿、临时目录的不算；认不出目标的按写项目文件算
+    const hits = bashWriteTargets(input.tool_input?.command).filter(t => !t || !isScratchPath(path.resolve(base, t.replace(/^~(?=\/)/, os.homedir()))));
+    if (!hits.length) return null;
     return { event: 'edit', signal: 'first-edit', key: 'first-edit' };
   }
   return null;

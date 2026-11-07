@@ -38,7 +38,7 @@ export function ourHookGroups(tool, node = stableNode(), base = KIT) {
     { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs'), timeout: TIMEOUT_SEC }] },
     { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd('lessons-remind.mjs'), timeout: TIMEOUT_SEC }] },
     // thinking-review 准入提醒（#35）：第一次改项目文件前、退出计划模式前。只有 Claude 有 thinking-review
-    ...(tool === 'claude' ? [{ matcher: 'Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode', hooks: [{ type: 'command', command: cmd('thinking-review-nudge.mjs'), timeout: TIMEOUT_SEC }] }] : []),
+    ...(tool === 'claude' ? [{ matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode', hooks: [{ type: 'command', command: cmd('thinking-review-nudge.mjs'), timeout: TIMEOUT_SEC }] }] : []),
   ];
 }
 

@@ -75,6 +75,33 @@ test('改文件节点：草稿、临时目录、Claude 自己的记忆不算', (
   assert.equal(classify({ hook_event_name: 'PreToolUse', tool_name: 'ExitPlanMode', tool_input: { plan: 'x' } }).signal, 'plan');
 });
 
+test('Bash 里改文件也算第一次改文件；只读命令、写到草稿和 /dev/null 的不算', () => {
+  const b = (command, cwd = '/x/proj') => classify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, tool_input: { command } })?.signal ?? null;
+  for (const c of [
+    "sed -i '' 's/#3366cc/#2f7d5b/' src/ui/status.html",
+    'sed -i.bak -e s/a/b/ a.txt',
+    "perl -pi -e 's/a/b/' x.js",
+    'echo hi > notes.md',
+    'cat >> src/a.js <<EOF\nx\nEOF',
+    'npm test | tee test.log',
+    'git apply fix.patch',
+    "python3 - <<'EOF'\nopen('a.py','w').write(s)\nEOF",
+  ])
+    assert.equal(b(c), 'first-edit', c);
+  for (const c of [
+    'git status',
+    'grep -rn x . 2>/dev/null',
+    'npm test 2>&1 | tail -5',
+    'ls > /dev/null',
+    'node a.mjs >&2',
+    'echo x > /tmp/a.txt',
+    "cat > /private/tmp/claude-501/s/scratchpad/a.md <<'EOF'\nx\nEOF",
+    "python3 - <<'EOF'\nprint(len(open('a').read()))\nEOF",
+    "sed -n 1,20p a.js",
+  ])
+    assert.equal(b(c), null, c);
+});
+
 function harness() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-trn-'));
   const session = `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

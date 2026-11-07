@@ -81,7 +81,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.deepEqual(after.permissions.ask, ['Bash(git reset --hard *)'], '#27 起不加先问规则，原有的不动');
   assert.ok(after.permissions.deny.includes('Bash(git push --force * main)'));
   assert.equal(after.hooks.PreToolUse.length, 3);
-  assert.equal(after.hooks.PreToolUse[2].matcher, 'Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode');
+  assert.equal(after.hooks.PreToolUse[2].matcher, 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode');
   assert.equal(after.hooks.UserPromptSubmit.length, 1);
   assert.ok(after.hooks.UserPromptSubmit[0].hooks[0].command.endsWith('thinking-review-nudge.mjs"'));
   const cmds = after.hooks.PreToolUse.flatMap(g => g.hooks);
