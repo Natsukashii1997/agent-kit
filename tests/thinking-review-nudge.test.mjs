@@ -24,6 +24,12 @@ test('交来的长方案：判为 handoff，同一份只算一个 key', () => {
   assert.notEqual(promptSignal(plan('（第二版）')).key, a.key);
 });
 
+test('一页长度的中文方案（约 600 字）也算交来方案', () => {
+  const page = `这是 GPT 给的任务书，按这个实施。\n# 同步状态持久化任务书\n## 目标\n${'推送中途被打断时清单会写坏，下次整库重传。'.repeat(14)}\n## 方案\n${'引入事务性存储，每推送成功一个文件就更新状态。'.repeat(8)}\n## 验收\n中断后不整库重传。`;
+  assert.ok(page.length >= 500 && page.length < 900, String(page.length));
+  assert.equal(sig(page), 'handoff');
+});
+
 test('常浩的短指令和普通请求不提醒', () => {
   for (const p of ['按推荐开工', '合并', '把这个按钮改成蓝色', '跑一下测试看看', '已通过，合并', '帮我看下这个报错：TypeError: x is undefined'])
     assert.equal(sig(p), null, p);
@@ -48,6 +54,10 @@ test('后台事件、会话间通知、斜杠命令不提醒', () => {
   assert.equal(sig(`<task-notification>\n<task-id>x</task-id>${plan()}`), null);
   assert.equal(sig('[SYSTEM NOTIFICATION - NOT USER INPUT] 思维评审'), null);
   assert.equal(sig('/thinking-review 这个方案'), null);
+  assert.equal(sig(`This session is being continued from a previous conversation that ran out of context.\n${plan()}`), null, '压缩后的续接摘要');
+  assert.equal(sig(`Background (from the session that started this one):\n${plan()}`), null, '别的会话派来的任务说明');
+  assert.equal(sig(`The agent-hud plugin sent a message.\n${plan()}`), null, '驿窗转回的 GPT 回信');
+  assert.equal(sig(`<command-message>to-spec</command-message>\n${plan()}`), null, '斜杠命令展开');
   assert.equal(sig(''), null);
 });
 

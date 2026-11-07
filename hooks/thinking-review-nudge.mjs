@@ -17,13 +17,15 @@ export const LOG_FILE = 'thinking-review-nudges.jsonl';
 const SEEN_DIR = 'thinking-review-sessions';
 export const OFF_FILE = 'thinking-review-nudge.off';
 
-// 后台事件、会话间通知、定时任务、CI 回报：不是常浩在交代事情
-const AUTOMATED = /^\s*(?:<(?:side-sessions-event|task-notification|ci-monitor-event|scheduled-task|system-reminder|local-command|command-name)\b|\[SYSTEM NOTIFICATION)/i;
+// 不是常浩在交代事情：后台事件、会话间通知、定时任务、CI 回报、斜杠命令展开；
+// 上下文压缩后的续接摘要、别的会话派来的任务说明（派出的会话已经判断过）、驿窗转回来的 GPT 回信（由 skill 第 6 节处理）
+const AUTOMATED = /^\s*(?:<(?:side-sessions-event|task-notification|ci-monitor-event|scheduled-task|system-reminder|local-command|command-name|command-message)\b|\[SYSTEM NOTIFICATION|This session is being continued from a previous conversation|(?:Background|Task) \(from the session|Please carry out this task|The agent-hud plugin sent)/i;
 const OPT_OUT = /(?:不用|不必|别|不要|无需|先不)(?:再)?(?:送审?|送\s*GPT|思维评审|评审)|直接开工/i;
 const ASKED = /思维评审/;
 const DOUBT = /方向(?:不对|错了|有问题|是不是错)|是不是(?:想|搞|做)错了|(?:前提|思路)(?:不对|错了)|推翻(?:重来|方案)|重新(?:想|考虑)(?:一下)?(?:方案|方向|思路)/;
 const PLAN_WORDS = ['方案', '任务书', '需求', '交接', '架构', '设计', '路线', '策略', '规划', '验收', 'PRD', 'spec', 'roadmap'];
-export const HANDOFF_MIN_CHARS = 1200;
+// 一页像样的中文方案约 500–900 字（实测样例 585、871 字），1200 会漏掉
+export const HANDOFF_MIN_CHARS = 500;
 const SHORT_MAX_CHARS = 400;
 
 // 判断一条用户消息带什么信号；没有信号返回 null
