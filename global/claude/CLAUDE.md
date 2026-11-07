@@ -108,6 +108,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 排障、发布、改脚本、装 launchd 或定时任务之前，先 `grep -n 关键词` 这份全局坑，再搜项目自己的 `docs/LESSONS.md`。
 - 项目里的坑判断为跨项目也成立时，提议提升为全局 G-xx（原条目保留并注明已提升）；只出提案，用户批准才写。
 - 新项目开工、或项目还没有 AGENTS.md / LESSONS 时，建议用「项目起步」铺骨架：Claude 用 `/project-starter`，Codex 用 `$project-starter`，或直接读 `my-skills/skills/project-starter/SKILL.md`。
+- 全局坑里这几条每次都要守（正确做法见 LESSONS 对应条目）：
+  - G-01 验证证据、备份放项目约定的持久目录，不放 `/tmp`。
+  - G-03 改了任何脚本都跑项目全量测试，不只做语法检查或单条路径验证。
+  - G-04 并行会话各开独立 worktree；做不到时只提交自己的文件和自己的改动块。
+  - G-11 截图验证要等页面画完、字体加载完再截，交互用真实输入事件；无头 Chrome 的一次性截图不能单独作为验收依据。
+  - G-12 到点才跑的任务不放在会话里等，交给 launchd 或 Hermes 定时任务，并且在体检里看得到。
+  - G-19 「终端里好、常驻服务里不好」先比两边的环境变量（代理等）；launchd 服务要用的变量写进 plist。
 
 ## 8. 项目目录
 
