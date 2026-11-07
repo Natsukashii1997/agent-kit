@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // 第 1 件：不可逆操作的硬闸（命令执行前的 hook，Claude Code 与 Codex 共用）。
 // 强推或删除 main / master 时直接拒绝（《工程流程》第 3 节「不 force push main」）；
-// 当前在 main/master 上、没写分支名（或写 HEAD）的 git push，在 Claude 里改成先问（Codex 的 hook 不支持先问）。
 // Claude 那边第一层是 config/claude-permissions.json 的 deny 规则（不会出错放行）；这个 hook 兜住规则认不出的写法
 // （git -C、参数顺序打乱、组合短参数等），Codex 没有 deny 规则，只靠它。
-// 要「先问我」的操作（合并 PR、推 main、强推分支、reset --hard 等）交给权限规则：
-// Claude 用 config/claude-permissions.json 的 ask，Codex 用 config/codex/agent-kit.rules。
+// 这个 hook 只拒绝、不先问：Claude 侧按常浩 2026-11-07 的决定（#27）不再对 git 操作先问；
+// Codex 侧的「先问」在 config/codex/agent-kit.rules。
 // 出错时不拦（退出码 1，hook 默认放行），只往 stderr 写原因；`node tools/doctor.mjs` 会自检这个 hook。
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -55,20 +54,17 @@ function parsePush(args) {
 }
 
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
-const RANK = { ask: 1, deny: 2 };
-const worse = (a, b) => (!a ? b : !b ? a : RANK[b.decision] > RANK[a.decision] ? b : a);
 
-// 返回 { decision: 'deny' | 'ask', reason } 或 null（不管）。
-// deny：强推或删除 main/master。ask：没写分支名（或写 HEAD）的推送、而当前分支是 main/master——权限规则认不出这种写法。
+// 返回 { decision: 'deny', reason } 或 null（不管）。deny：强推或删除 main/master。
 // currentBranch(dir) 用来判断没写分支名、或写 HEAD 时推的是哪个分支。
 export function decide(command, { cwd, currentBranch = defaultCurrentBranch, depth = 0 } = {}) {
-  let result = null;
   for (const segment of splitCommands(command)) {
     const tokens = stripWrappers(tokenize(segment));
     // bash -c "…"、sh -c "…"：拆出里面那条命令再判断
     if (tokens.length && SHELLS.has(path.basename(tokens[0])) && depth < 3) {
       const i = tokens.findIndex((t, k) => k > 0 && /^-[a-z]*c[a-z]*$/.test(t));
-      if (i > 0 && tokens[i + 1] !== undefined) result = worse(result, decide(tokens[i + 1], { cwd, currentBranch, depth: depth + 1 }));
+      const inner = i > 0 && tokens[i + 1] !== undefined ? decide(tokens[i + 1], { cwd, currentBranch, depth: depth + 1 }) : null;
+      if (inner) return inner;
       continue;
     }
     const git = gitArgs(tokens);
@@ -89,20 +85,16 @@ export function decide(command, { cwd, currentBranch = defaultCurrentBranch, dep
         return { decision: 'deny', reason: `已拦下：强推到 ${dst}。《工程流程》第 3 节规定不 force push main/master；要改 main 请走 PR。确有必要请常浩本人在终端里操作。` };
       if (deleting)
         return { decision: 'deny', reason: `已拦下：删除远端 ${dst} 分支。这是不可逆操作，请常浩本人在终端里操作。` };
-      if (viaHead)
-        result = worse(result, { decision: 'ask', reason: `当前在 ${dst} 分支上，这条命令会推 ${dst}。按《工程流程》第 5 节，推 main 之前要先查别的会话没推的提交和私人内容，由常浩确认。` });
     }
     if (force && all)
       return { decision: 'deny', reason: '已拦下：带强推的 --all / --mirror 会一起强推 main/master。请只推当前分支。' };
     if (refspecs.length === 0) {
       const branch = branchHere();
-      if (branch && isProtected(branch)) {
-        if (force) return { decision: 'deny', reason: `已拦下：当前在 ${branch} 分支上强推。《工程流程》第 3 节规定不 force push main/master。` };
-        result = worse(result, { decision: 'ask', reason: `当前在 ${branch} 分支上，没写分支名的 git push 会推 ${branch}。按《工程流程》第 5 节，推 main 之前要先查别的会话没推的提交和私人内容，由常浩确认。` });
-      }
+      if (branch && isProtected(branch) && force)
+        return { decision: 'deny', reason: `已拦下：当前在 ${branch} 分支上强推。《工程流程》第 3 节规定不 force push main/master。` };
     }
   }
-  return result;
+  return null;
 }
 
 function defaultCurrentBranch(dir) {
@@ -117,10 +109,9 @@ function defaultCurrentBranch(dir) {
   }
 }
 
-// agent 为 codex 时不输出 ask：Codex 的 PreToolUse 不支持 ask（源码 hooks/src/engine/output_parser.rs 会判为无效输出），
-// 那一侧的「先问」交给 config/codex/agent-kit.rules。
-export function hookOutput(result, agent = 'claude') {
-  if (!result || (result.decision === 'ask' && agent === 'codex')) return '';
+// Claude 和 Codex 输出同一种 deny（hook 只拒绝，不输出 ask；Codex 的 PreToolUse 本来也不支持 ask）。
+export function hookOutput(result) {
+  if (!result) return '';
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -135,8 +126,7 @@ if (isEntry(import.meta.url)) {
     const input = parseJson(readStdin()) || {};
     const command = input.tool_input?.command;
     if (typeof command === 'string') {
-      const agent = process.argv.includes('--agent=codex') ? 'codex' : 'claude';
-      const out = hookOutput(decide(command, { cwd: input.cwd }), agent);
+      const out = hookOutput(decide(command, { cwd: input.cwd }));
       if (out) process.stdout.write(out);
     }
   } catch (err) {

@@ -166,9 +166,11 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       const mine = manifest.claude?.[key] || [];
       if (remove) after = mergeRules(after, key, mine, { remove: true });
       else {
-        after = mergeRules(after, key, cfg[key]);
+        // 以前装时加的、配置里已经去掉的规则，重装时一并去掉
+        const dropped = mine.filter(r => !cfg[key].includes(r));
+        after = mergeRules(mergeRules(after, key, dropped, { remove: true }), key, cfg[key]);
         // 记下「这次新加的」加上「以前装时加的、现在还在的」；你原来就有的同名规则不算
-        nextManifest.claude[key] = [...new Set([...mine.filter(r => had.includes(r)), ...cfg[key].filter(r => !had.includes(r))])];
+        nextManifest.claude[key] = [...new Set([...mine.filter(r => had.includes(r) && !dropped.includes(r)), ...cfg[key].filter(r => !had.includes(r))])];
       }
     }
     after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
