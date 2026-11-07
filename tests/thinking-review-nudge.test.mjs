@@ -132,14 +132,16 @@ test('作为 hook 真跑：提醒格式对、只提醒不做决定、同一节�
   const first = run(edit);
   assert.equal(first.hookEventName, 'PreToolUse');
   assert.equal(first.permissionDecision, 'deny');
-  assert.match(first.permissionDecisionReason, /只拦这一次/);
+  assert.match(first.permissionDecisionReason, /最多 3 次/);
+  // 同一轮并行的另一个写文件也要拦；拦满 3 次后放行，不会死循环
+  assert.equal(run({ ...edit, tool_name: 'Edit', tool_input: { file_path: '/x/proj/b.ts' } }).permissionDecision, 'deny');
+  assert.equal(run(edit).permissionDecision, 'deny');
   assert.equal(run(edit), null);
-  assert.equal(run({ ...edit, tool_name: 'Edit', tool_input: { file_path: '/x/proj/b.ts' } }), null);
 
   const rows = log();
   assert.deepEqual(rows.map(r => [r.event, r.signal, r.nudged]), [
     ['prompt', 'handoff', true], ['prompt', 'handoff', false], ['prompt', 'handoff', true],
-    ['edit', 'gate', true], ['edit', 'first-edit', false], ['edit', 'first-edit', false],
+    ['edit', 'gate', true], ['edit', 'gate', true], ['edit', 'gate', true], ['edit', 'first-edit', false],
   ]);
   const raw = JSON.stringify(rows);
   assert.ok(!raw.includes('知识库') && !raw.includes('secret') && !raw.includes('a.ts'), '记录里不留提示词、文件内容和路径');
@@ -152,6 +154,15 @@ test('普通会话（没有高风险信号）：第一次改文件只提醒、�
   assert.equal(first.permissionDecision, undefined);
   assert.match(first.additionalContext, /这次改动已经执行/);
   assert.equal(run(edit), null);
+});
+
+test('高风险候选：拦到调用了 thinking-review 为止', () => {
+  const { dir, session, run } = harness();
+  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
+  run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
+  assert.equal(run(edit).permissionDecision, 'deny');
+  fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), `${JSON.stringify({ time: 't', session, skill: 'thinking-review' })}\n`);
+  assert.equal(run(edit), null, '调用后放行');
 });
 
 test('高风险候选的拦截：已调用 skill 不拦；常浩说了直接开工不拦；点名、质疑方向也算高风险', () => {

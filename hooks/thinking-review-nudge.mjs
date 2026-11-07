@@ -7,7 +7,7 @@
 //     （常浩基本不用计划模式，这才是「准备动手」的节点）。注意时序：PreToolUse 的 additionalContext 随这次工具的结果
 //     一起进入下一次模型请求，这次改动照常执行——所以它是「刚开始改」的提醒，不是改之前的门。
 //     只有高风险候选（本会话收到过常浩交来的方案 / 点名 / 质疑方向，还没调用 thinking-review，常浩也没说
-//     「直接开工」）时，第一次改文件会被拦一次（deny），请 Claude 先做准入判断再重试；每个会话最多拦一次，普通任务不拦。
+//     「直接开工」）时，改项目文件会被拦（deny），直到调用了 thinking-review，最多 3 次；普通任务、派来的任务不拦。
 //   PreToolUse ExitPlanMode：退出计划模式时
 // 用本机规则判断，不调模型、不外发；记录只写时间、会话、节点、信号编码，不写提示词和文件内容。
 // 同一会话同一节点只提醒一次，同一份方案（含派来的同一份任务说明）只提醒一次；本会话已经调用过 thinking-review 的，
@@ -186,8 +186,9 @@ function readSeen(sessionId, dir) {
   }
 }
 
+export const GATE_MAX = 3;
 export const GATE_REASON =
-  'thinking-review 前置检查（本会话只拦这一次）：本会话收到过交来的方案、点名思维评审或质疑方向，还没做 thinking-review 准入判断，这次改动没有执行。先调用 thinking-review skill 判断当前问题属于 A / B / A+B / C（判成 B 或 C 只要一句话），再重试这次修改。常浩说过「直接开工」的不会被拦。';
+  'thinking-review 前置检查：本会话收到过交来的方案、点名思维评审或质疑方向，还没调用 thinking-review 做准入判断，这次改动没有执行。先调用 thinking-review skill 判断当前问题属于 A / B / A+B / C（判成 B 或 C 只要一句话），再重试；调用之前的改项目文件都会被拦（最多 3 次）。常浩说过「直接开工」的不会被拦。';
 
 // 记下这个 key；返回 true 表示第一次见（该提醒）
 function markSeen(sessionId, key, dir, env) {
@@ -221,9 +222,12 @@ export function run(input, { env = process.env, now = new Date() } = {}) {
   else if ((node.event === 'edit' || node.event === 'plan') && judgedInSession(input.session_id, dir)) reason = 'judged';
   else if (node.event === 'edit' && input.session_id && !env.AGENT_KIT_NO_DEDUPE) {
     const seen = readSeen(input.session_id, dir);
-    if (seen.some(k => RISKY.test(k)) && !seen.includes('optout') && !seen.includes('gate')) {
+    const gates = seen.filter(k => k.startsWith('gate#')).length;
+    // 拦到调用了 thinking-review 为止（上面 judged 那一支会放行），最多 GATE_MAX 次，防止死循环。
+    // 不能只拦一次：实测 Claude 同一轮并行发出几个写文件调用，只拦第一个，其余照样写进去了
+    if (seen.some(k => RISKY.test(k)) && !seen.includes('optout') && gates < GATE_MAX) {
       gate = true;
-      markSeen(input.session_id, 'gate', dir, env);
+      markSeen(input.session_id, `gate#${gates + 1}`, dir, env);
       markSeen(input.session_id, 'first-edit', dir, env);
     } else if (!markSeen(input.session_id, node.key, dir, env)) reason = 'seen';
   } else if (!markSeen(input.session_id, node.key, dir, env)) reason = 'seen';
