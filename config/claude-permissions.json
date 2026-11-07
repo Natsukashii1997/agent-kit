@@ -1,5 +1,5 @@
 {
-  "说明": "第 1 件：不可逆操作机器把关。由 tools/install.mjs 合并进 ~/.claude/settings.json 的 permissions.deny。deny：强推或删除 main/master，直接拒绝，任何权限模式下都生效；权限规则不会「出错放行」，是硬的一层，hooks/guard-git.mjs 再兜住这些写法认不出的情况（git -C、参数顺序打乱等）。ask 清空：常浩 2026-11-07 决定（#27），Claude 会话默认 bypass，合并 PR、删分支、强推功能分支、推 main、reset --hard、git clean、stash drop 等不再先问，交给 Claude 判断；重装时会去掉以前装进去的先问规则。",
+  "说明": "第 1 件：不可逆操作机器把关。由 tools/install.mjs 合并进 ~/.claude/settings.json 的 permissions.deny。deny：强推或删除 main/master，直接拒绝，任何权限模式下都生效；权限规则不会「出错放行」，是硬的一层，hooks/guard-git.mjs 再兜住这些写法认不出的情况（git -C、参数顺序打乱等）。ask 为空：Claude 侧不再先问，决定与理由见 docs/机器执行层.md 第 1 件（#27）。",
   "deny": [
     "Bash(git push --force * main)",
     "Bash(git push --force * master)",

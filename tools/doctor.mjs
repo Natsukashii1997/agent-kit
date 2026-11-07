@@ -75,7 +75,7 @@ function checkHooks({ home, run, env, dir }) {
   const hasGuard = hookCmds.some(c => c.includes('hooks/guard-git.mjs'));
   const hasRemind = hookCmds.some(c => c.includes('hooks/lessons-remind.mjs'));
   const hasSkill = (settings.hooks?.PostToolUse || []).some(g => (g.hooks || []).some(h => (h.command || '').includes('hooks/skill-usage.mjs')));
-  if (!missing.length && hasGuard && hasRemind && hasSkill) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则、${cfg.ask.length} 条先问规则、3 个 hook 都在`] });
+  if (!missing.length && hasGuard && hasRemind && hasSkill) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、3 个 hook 都在`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',

@@ -32,10 +32,10 @@ export function stableNode(execPath = process.execPath, exists = fs.existsSync) 
 }
 
 export function ourHookGroups(tool, node = stableNode(), base = KIT) {
-  const cmd = (file, extra = '') => `"${node}" "${path.join(base, 'hooks', file)}"${extra}`;
+  const cmd = file => `"${node}" "${path.join(base, 'hooks', file)}"`;
   const remindMatcher = tool === 'claude' ? 'Bash|Edit|Write|MultiEdit|NotebookEdit' : 'Bash|apply_patch|Edit|Write';
   return [
-    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs', tool === 'codex' ? ' --agent=codex' : ''), timeout: TIMEOUT_SEC }] },
+    { matcher: 'Bash', hooks: [{ type: 'command', command: cmd('guard-git.mjs'), timeout: TIMEOUT_SEC }] },
     { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd('lessons-remind.mjs'), timeout: TIMEOUT_SEC }] },
   ];
 }
@@ -181,7 +181,8 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、permissions.ask 新增 ${n('ask')} 条（已有的不重复加）；hooks.PreToolUse 放入 guard-git、lessons-remind，hooks.PostToolUse 放入 skill-usage（旧的 agent-kit hook 先去掉）`);
+      const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind，hooks.PostToolUse 放入 skill-usage（旧的 agent-kit hook 先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');

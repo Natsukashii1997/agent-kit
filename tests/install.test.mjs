@@ -89,7 +89,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   const manifest = JSON.parse(fs.readFileSync(path.join(state, 'install-manifest.json'), 'utf8'));
   assert.ok(!manifest.claude.ask.includes('Bash(git reset --hard *)'), '原有的同名规则不记成自己加的');
   const codexHooks = JSON.parse(fs.readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8'));
-  assert.ok(codexHooks.hooks.PreToolUse[0].hooks[0].command.endsWith('--agent=codex'));
+  assert.ok(codexHooks.hooks.PreToolUse[0].hooks[0].command.endsWith('guard-git.mjs"'));
   assert.ok(fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
 
   // 装好的 hook 照设置里的命令原样跑得起来
