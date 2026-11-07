@@ -228,13 +228,14 @@
 
 ## G-19 launchd 起的服务读不到终端里的代理变量，直连被 DNS 污染，请求一直超时（2026-11-05 新增）
 
-- 现象：同一个智能体框架（Hermes）的两个常驻网关，一个正常回复，另一个（后来新建的 profile）收到飞书消息后一直不回；日志里卡在调用模型接口（chatgpt.com），先是长时间无响应再报 `APITimeoutError` 反复重试。在终端里 `curl` 同一个地址却很快返回，容易误判成模型服务抽风。查进程连接能看到它在连 Facebook / Twitter 的 IP（`2a03:2880:…`、`199.16.156.11`）。
-- 根因：launchd 任务不继承终端 shell 的 `HTTPS_PROXY` 等变量，只认 plist 里 `EnvironmentVariables` 写的。正常那个网关的 plist 是手动加过代理变量的；新 profile 的 plist 由框架自动生成，没有代理变量，于是直连，而系统 DNS 把被墙域名解析成了污染地址。终端里有代理变量，所以手测是好的。
+- 现象：同一个智能体框架（Hermes）的两个常驻网关，一个正常回复，另一个（后来新建的 profile）收到飞书消息后一直不回；日志里卡在调用模型接口（chatgpt.com），先是长时间无响应再报 `APITimeoutError` 反复重试。在终端里 `curl` 同一个地址却很快返回，容易误判成模型服务抽风。查进程连接能看到它在连 Facebook / Twitter 的 IP（`2a03:2880:…`、`199.16.156.11`）。2026-11-07 又踩一次：另一个会话执行 `hermes gateway restart` 后，猛鬼兽网关的 plist 被重写、代理丢失，主模型连接超时（`ConnectTimeout`），对话回退到 deepseek-flash；Codex 额度其实充足。
+- 根因：launchd 任务不继承终端 shell 的 `HTTPS_PROXY` 等变量，只认 plist 里 `EnvironmentVariables` 写的。正常那个网关的 plist 是手动加过代理变量的；新 profile 的 plist 由框架自动生成，没有代理变量，于是直连，而系统 DNS 把被墙域名解析成了污染地址。终端里有代理变量，所以手测是好的。另外，`hermes gateway restart/start/install` 和 `hermes update` 每次都会把现有 plist 和 Hermes 模板比对，只忽略 PATH，不一致就整份重写（`hermes_cli/gateway_launchd.py` 的 `refresh_launchd_plist_if_needed`），所以手工加进 plist 的变量一定会被冲掉。
 - 正确做法：
   - 排查「终端里好、常驻服务里不好」的网络问题，先比两边的环境：`launchctl print gui/<uid>/<label>` 或 `ps eww -p <pid>` 看进程有没有代理变量，`lsof -nP -a -p <pid> -i TCP` 看它实际连到哪个 IP。
   - 需要走代理的 launchd 服务，在 plist 的 `EnvironmentVariables` 里写全大小写两套：`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` 和 `https_proxy`/`http_proxy`/`no_proxy`；国内直连的域名（如 `.feishu.cn`）放进 `NO_PROXY`。改完先 `plutil -lint`，再重装（按 G-18 等 bootout 卸完再 bootstrap）。
   - 框架自动生成或重装 plist（新建 profile、`gateway install` 之类）后，回读一遍代理变量还在不在；同一台机器上多个同类服务的环境变量要对齐。
+  - Hermes 网关的代理同时写进对应 profile 的 `.env`（`~/.hermes/.env`、`~/.hermes/profiles/<名>/.env`），以 `.env` 为准：网关启动时会把它读进进程环境并覆盖已有值，plist 被重写也不丢。只想重启进程、不想动 plist 时，用 `launchctl kickstart -k gui/<uid>/<label>`，不用 `hermes gateway restart`。
 - 来源：Hermes 亚古兽网关 2026-11-05（本机服务，没有项目仓库；改前备份 `~/.hermes/backups/ai.hermes.gateway-agumon.plist.bak-20261105`；补代理变量并重启后，那条卡住的消息 4.6 秒回复成功）。
-- 出现过的项目：Hermes 本机网关（踩到，已修）。
+- 出现过的项目：Hermes 本机网关（踩到 2 次，都已修；第 2 次见 #17，改前备份 `~/.hermes/backups/ai.hermes.gateway.plist.bak-20261107`，`.env` 备份在同一目录）。
 - 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`HTTPS_PROXY`、`https_proxy`、`EnvironmentVariables`、`gateway install`
