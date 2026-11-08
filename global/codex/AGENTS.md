@@ -135,7 +135,7 @@ PRD、评估报告、述职、方法论文档及其他重要文档共创，先�
 
 技术交付附最小非技术使用说明：需要安装什么、在哪里操作、按什么顺序、看到什么算成功、常见问题如何自查；适合时提供一条安全的自检命令。批量工具结果先在工具侧按字段和范围筛选，只把判断所需的片段带回上下文；需要原文时再定点读取，避免把完整会话、日志或工具清单反复回灌。完整日志、源码、DOM 和批量数据仅在确有交付或诊断需要且不含秘密时保存，聊天保留结论、关键证据、限制和可点击成果路径。
 
-要不要多 Agent 协同（独立审查、独立验证、并行研究、长期委派）、用哪个模式、找谁做：先查 `/Users/nat/Documents/ChatGPT/个人/work/multi-agent/docs/routing.md`；默认单 Agent 直接做。选 Agent 前跑 `node /Users/nat/Documents/ChatGPT/个人/work/multi-agent/scripts/probe-agents.mjs` 看谁现在可用（只读，不耗额度）。
+常规任务默认由单 Agent 直接完成；仅当任务可能需要独立审查、独立验证、并行研究或长期委派，且第二个角色可能带来增量价值时，才查 `/Users/nat/Documents/ChatGPT/个人/work/multi-agent/docs/routing.md`，判断要不要协同、用哪个模式、找哪个 Agent。确定要选协同 Agent 后，再跑 `node /Users/nat/Documents/ChatGPT/个人/work/multi-agent/scripts/probe-agents.mjs` 核实谁现在可用（只读，不调用模型）。
 
 ## 软件项目、Skill 与维护入口
 
