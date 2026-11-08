@@ -21,6 +21,7 @@ Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 - 接手别人（常浩或其他 AI）已形成的方案、形成重大架构或业务方法论、准备按一个方向大量实施、或关键前提被推翻时，先按 thinking-review 判断当前问题属于 A / B / A+B / C。判断需要 ≠ 发起接力：已有有效结论、常浩已拍板、属于 B / C 的直接做，不送 GPT。
+- 常规任务默认由单 Agent 直接完成；仅当任务可能需要独立审查、独立验证、并行研究或长期委派，且第二个角色可能带来增量价值时，才查 `/Users/nat/Documents/ChatGPT/个人/work/multi-agent/docs/routing.md`，判断要不要协同、用哪个模式、找哪个 Agent。确定要选协同 Agent 后，再跑 `node /Users/nat/Documents/ChatGPT/个人/work/multi-agent/scripts/probe-agents.mjs` 核实谁现在可用（只读，不调用模型）。
 
 ## 2. Simplicity First
 
