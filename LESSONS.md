@@ -308,3 +308,20 @@
 - 出现过的项目：postpane。
 - 升级：未升级。
 - 触发：`CliGovernor`、`governor_evict`、`claude-code-sessions`、`/claude -p --resume/`
+
+## G-25 Claude 桌面版里 Bash 被内置「危险 rm」检查要求批准，批准没地方点，约 16 分钟后会话被判 stopped responding（2026-11-09 提升）
+
+- 现象：bypass 模式的会话里，一条 Bash 一直不返回，约 16 分钟后弹「Claude Code stopped responding」，只能点 Try again。命令一行都没执行。`~/Library/Logs/Claude/main.log` 里是 `timed out after 960~1016s of inactivity … last_tool_name=Bash … outstanding_host_request=none`。
+- 根因：三环。
+  - ① Claude Code 内置的危险 rm 检查在 bypass 下也要求人工批准。会触发它的写法有两类：rm 的目标拿不准（变量加通配符、整目录通配、可能为空的变量、命令替换；先 `cd` 到工作目录外或有 `source` 时更容易被拦，同样的写法其他时候能过）；命令里有它解析不了的写法（两个美元符加左括号、两个反斜杠加美元符加左括号）。
+  - ② 本机配了 PermissionRequest 钩子（如驿窗）时，批准请求先交给钩子，桌面版窗口不弹；钩子一直不回，就没地方能批。
+  - ③ 桌面版对一轮对话约 960 秒没动静就掐断。
+- 正确做法：
+  - rm 目标里的变量写成 `"${X:?}"`（变量为空时 shell 直接报错、不去删）；通配收窄到文件类型或写明文件名；确实要清空目录就按字面路径删目录再重建。
+  - 要嵌代码或长文本，先用 Write 写成文件再执行，不放进 heredoc 或引号。
+  - 不要绕过检查（拆开删、换别的工具删）；改写后删的范围不能变大。
+  - 弹了「stopped responding」，先在 `main.log` 搜 `timed out after`，看 `last_tool_name` 和 `outstanding_host_request`。
+- 来源：postpane L-37、L-41；agent-kit#49（PR #50）。近 14 天会话记录 66280 条 Bash，30 条被这个检查拦、11 条卡到会话断开；证据 `~/Library/Application Support/agent-kit/evidence/2026-11-09-49-bash-precheck/`（26 条真实 Claude Code 探针、装机前后两次端到端记录、语料评估）。
+- 出现过的项目：postpane、carvomoto；语料里 work-desk、github-center、my-skills、personal-ai-workbench 的会话也被拦过。
+- 升级：机器拦截，`hooks/bash-precheck.mjs`（#49）在执行前当场拒绝这几类写法并给出改写；`tools/doctor.mjs` 查装没装、实跑一次。
+- 触发：`stopped responding`、`timed out after`、`outstanding_host_request`
