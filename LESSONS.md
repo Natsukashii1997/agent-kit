@@ -295,3 +295,16 @@
 - 出现过的项目：postpane。
 - 升级：未升级。
 - 触发：`CARGO_TARGET_DIR`
+
+## G-24 Claude 桌面版回收空闲会话的进程，打开会话也不会重新跑起来（2026-11-09 提升）
+
+- 现象：程序往 Claude 桌面版的某个会话留话（插件队列、待发送目录），会话空闲一会儿后话就再也没人领：插件签到停了或写着已结束，排队的话一直不动。去桌面版里点开这个会话、或打开它的 `claude://…/local_…` 链接，界面出来了，话还是没被领走。
+- 根因：两层。① 内存紧张时桌面版主动停掉空闲会话的 Claude Code 进程，日志 `~/Library/Logs/Claude/main.log` 记 `[CliGovernor] pressure evicting local_… (idle Ns)` 和 `Pausing session … (governor_evict)`；空闲超时（1800 秒）也会断开。后台任务在跑也算空闲。② 点开会话或打开链接，桌面版只做 `Warming session`（预热），不重启进程；要有一条消息发进去，它才重启进程（`Resuming session`），插件才重新签到、领话。
+- 正确做法：
+  - 不要指望「会话还开着」或「让人点开会话」：先看插件签到，写着已结束或很久没签到，就当进程已停。
+  - 要让它接着干活，就用 `claude -p --resume <CLI 会话号> --permission-mode <会话自己的模式>` 在后台续接。工作目录、模型、思考强度、权限模式从桌面版的会话记录 `~/Library/Application Support/Claude/claude-code-sessions/**/local_*.json`（`cliSessionId` 对上）取。只在不需要人点允许的模式（auto、acceptEdits、bypassPermissions）下续接，其余交还给人。之后桌面版接着用同一个会话号，看得到续接的那一轮。
+  - 先撤回已排队的话再续接，撤回不了（已被领走）就不续接，防止同一段话送两遍。
+- 来源：postpane L-14 补正（`docs/LESSONS.md`，postpane#175、PR #177）；证据 `~/Library/Application Support/postpane/evidence/2026-11-07-{bg-wait,link-wake,headless-resume}/`（日志摘录、打开链接只预热、后台续接 12 秒完成），实机全流程 `~/Library/Application Support/postpane/evidence/2026-11-09-wake-live/watch.log`（停进程后 ChatGPT 判需修改，后台续接改完交回复审，通过）。
+- 出现过的项目：postpane。
+- 升级：未升级。
+- 触发：`CliGovernor`、`governor_evict`、`claude-code-sessions`、`/claude -p --resume/`
