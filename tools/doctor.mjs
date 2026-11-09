@@ -77,7 +77,8 @@ function checkHooks({ home, run, env, dir }) {
   const hasSkill = (settings.hooks?.PostToolUse || []).some(g => (g.hooks || []).some(h => (h.command || '').includes('hooks/skill-usage.mjs')));
   const promptCmds = (settings.hooks?.UserPromptSubmit || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
   const hasNudge = hookCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs')) && promptCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs'));
-  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、4 个 hook 都在`] });
+  const hasPrecheck = hookCmds.some(c => c.includes('hooks/bash-precheck.mjs'));
+  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、5 个 hook 都在`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -88,6 +89,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasRemind ? ['没装 lessons-remind'] : []),
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
+        ...(!hasPrecheck ? ['没装 bash-precheck（Bash 预检，防会话卡在没人点的安全检查批准上）'] : []),
         '装法：node tools/install.mjs --apply',
       ],
     });
@@ -130,12 +132,22 @@ function checkHooks({ home, run, env, dir }) {
   };
   const g = runHook('guard-git.mjs', { tool_name: 'Bash', tool_input: { command: 'git push -f origin main' } });
   const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Bash', tool_input: { command: 'launchctl list' } }, { AGENT_KIT_NO_LOG: '1' });
+  const p = runHook('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }, { AGENT_KIT_NO_LOG: '1' });
   const okG = g.code === 0 && g.stdout.includes('"deny"');
   const okR = r.code === 0 && r.stdout.includes('G-05');
+  const okP = p.code === 0 && p.stdout.includes('"deny"');
   results.push(
-    okG && okR
-      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；launchctl 收到 G-05 提醒（${hasGuard && hasRemind ? '按设置里的命令实跑' : '没装，用仓库里的脚本试跑'}）`] }
-      : { name: 'hook 实跑自检', status: 'fail', detail: [...(!okG ? [`guard-git 没拦下强推 main：${g.stderr || g.stdout || `退出码 ${g.code}`}`] : []), ...(!okR ? [`lessons-remind 没提醒：${r.stderr || r.stdout || `退出码 ${r.code}`}`] : [])] },
+    okG && okR && okP
+      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下（${hasGuard && hasRemind && hasPrecheck ? '按设置里的命令实跑' : '有没装的，用仓库里的脚本试跑'}）`] }
+      : {
+          name: 'hook 实跑自检',
+          status: 'fail',
+          detail: [
+            ...(!okG ? [`guard-git 没拦下强推 main：${g.stderr || g.stdout || `退出码 ${g.code}`}`] : []),
+            ...(!okR ? [`lessons-remind 没提醒：${r.stderr || r.stdout || `退出码 ${r.code}`}`] : []),
+            ...(!okP ? [`bash-precheck 没拦下 rm 变量加通配符：${p.stderr || p.stdout || `退出码 ${p.code}`}`] : []),
+          ],
+        },
   );
   return results;
 }

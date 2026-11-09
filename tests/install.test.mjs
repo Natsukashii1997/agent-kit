@@ -28,8 +28,8 @@ test('合并 hook：保留别人的 hook，重复安装不会叠加', () => {
   assert.equal(once.model, 'x');
   assert.deepEqual(once.hooks.Stop, start.hooks.Stop);
   assert.deepEqual(once.hooks.PreToolUse[0], theirs);
-  assert.equal(once.hooks.PreToolUse.filter(g => g.hooks.some(isOurHook)).length, 3, 'guard-git、lessons-remind、thinking-review-nudge');
-  assert.equal(mergeHooks(start, ourHookGroups('codex', '/n')).hooks.PreToolUse.filter(g => g.hooks.some(isOurHook)).length, 2, 'Codex 没有 thinking-review');
+  assert.equal(once.hooks.PreToolUse.filter(g => g.hooks.some(isOurHook)).length, 4, 'guard-git、lessons-remind、thinking-review-nudge、bash-precheck');
+  assert.equal(mergeHooks(start, ourHookGroups('codex', '/n')).hooks.PreToolUse.filter(g => g.hooks.some(isOurHook)).length, 2, 'Codex 没有 thinking-review 和 bash-precheck');
   const removed = mergeHooks(once, [], { remove: true });
   assert.deepEqual(removed, start);
 });
@@ -80,8 +80,10 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.equal(after.autoMemoryEnabled, false);
   assert.deepEqual(after.permissions.ask, ['Bash(git reset --hard *)'], '#27 起不加先问规则，原有的不动');
   assert.ok(after.permissions.deny.includes('Bash(git push --force * main)'));
-  assert.equal(after.hooks.PreToolUse.length, 3);
+  assert.equal(after.hooks.PreToolUse.length, 4);
   assert.equal(after.hooks.PreToolUse[2].matcher, 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode');
+  assert.equal(after.hooks.PreToolUse[3].matcher, 'Bash');
+  assert.ok(after.hooks.PreToolUse[3].hooks[0].command.endsWith('bash-precheck.mjs"'));
   assert.equal(after.hooks.UserPromptSubmit.length, 1);
   assert.ok(after.hooks.UserPromptSubmit[0].hooks[0].command.endsWith('thinking-review-nudge.mjs"'));
   const cmds = after.hooks.PreToolUse.flatMap(g => g.hooks);
@@ -101,6 +103,8 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.match(guard.stdout, /"deny"/);
   const nudge = spawnSync('/bin/sh', ['-c', after.hooks.UserPromptSubmit[0].hooks[0].command], { input: JSON.stringify({ session_id: 's', hook_event_name: 'UserPromptSubmit', prompt: '这个思维评审一下' }), encoding: 'utf8', env: { ...process.env, ...env } });
   assert.match(nudge.stdout, /thinking-review/);
+  const precheck = spawnSync('/bin/sh', ['-c', cmds.at(-1).command], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }), encoding: 'utf8', env: { ...process.env, ...env, AGENT_KIT_NO_LOG: '1' } });
+  assert.match(precheck.stdout, /"deny"/);
 
   assert.equal(quiet(() => main(args(['--apply']), home, env)), 0, '重复安装');
   assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), after, '重复安装不改设置');

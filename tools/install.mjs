@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs'];
+const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs'];
 const TIMEOUT_SEC = 10;
 
 export const isOurHook = h => typeof h?.command === 'string' && HOOK_FILES.some(f => h.command.includes(`hooks/${f}`));
@@ -39,6 +39,8 @@ export function ourHookGroups(tool, node = stableNode(), base = KIT) {
     { matcher: remindMatcher, hooks: [{ type: 'command', command: cmd('lessons-remind.mjs'), timeout: TIMEOUT_SEC }] },
     // thinking-review 准入提醒（#35）：第一次改项目文件前、退出计划模式前。只有 Claude 有 thinking-review
     ...(tool === 'claude' ? [{ matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode', hooks: [{ type: 'command', command: cmd('thinking-review-nudge.mjs'), timeout: TIMEOUT_SEC }] }] : []),
+    // Bash 预检（#49）：提前拦下会触发 Claude Code 内置危险 rm 检查的写法。Codex 没有这个检查
+    ...(tool === 'claude' ? [{ matcher: 'Bash', hooks: [{ type: 'command', command: cmd('bash-precheck.mjs'), timeout: TIMEOUT_SEC }] }] : []),
   ];
 }
 
@@ -108,6 +110,8 @@ export function selfTest(base = KIT, node = process.execPath) {
   if (s.status !== 0) problems.push(`skill-usage 跑不起来（退出码 ${s.status}，${s.stderr || s.stdout}）`);
   const t = run('thinking-review-nudge.mjs', { session_id: 'selftest', hook_event_name: 'UserPromptSubmit', prompt: '这个思维评审一下' });
   if (t.status !== 0 || !String(t.stdout).includes('thinking-review')) problems.push(`thinking-review-nudge 没对「思维评审」给出提醒（退出码 ${t.status}，${t.stderr || t.stdout}）`);
+  const b = run('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } });
+  if (b.status !== 0 || !String(b.stdout).includes('"deny"')) problems.push(`bash-precheck 没拦下 rm 变量加通配符（退出码 ${b.status}，${b.stderr || b.stdout}）`);
   return problems;
 }
 
@@ -160,7 +164,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒。');
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符。');
     plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
@@ -188,12 +192,12 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     after = mergeHooks(after, ourPromptGroups('claude', stableNode(), runtime), { remove, event: 'UserPromptSubmit' });
     plan.push(`Claude Code：${file}`);
     if (remove) {
-      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 5 组 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 5 组 hook）');
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 6 组 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 6 组 hook）');
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
       const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge，hooks.PostToolUse 放入 skill-usage，hooks.UserPromptSubmit 放入 thinking-review-nudge（旧的 agent-kit hook 先去掉）`);
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage，hooks.UserPromptSubmit 放入 thinking-review-nudge（旧的 agent-kit hook 先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
