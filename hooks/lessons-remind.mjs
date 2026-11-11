@@ -11,14 +11,17 @@ import { isEntry, parseJson, readStdin, stateDir } from './lib/common.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const LESSONS_FILE = path.resolve(HERE, '..', 'LESSONS.md');
 
-// 解析 LESSONS.md：每条 { id, title, line, triggers: [字符串或正则], fix }
+// 「升级」一行开头的层级词，从强到弱（LESSONS「怎么升级」，#57）
+export const LEVELS = ['结构', '机检', '体检', '文字', '提醒'];
+
+// 解析 LESSONS.md：每条 { id, title, line, triggers: [字符串或正则], fix, level: LEVELS 之一或 null }
 export function parseLessons(text) {
   const entries = [];
   let cur = null;
   text.split('\n').forEach((raw, i) => {
     const head = raw.match(/^## (G-\d+) (.+?)(?:（\d{4}-\d{2}-\d{2}[^）]*）)?\s*$/);
     if (head) {
-      cur = { id: head[1], title: head[2].trim(), line: i + 1, triggers: null, fix: '' };
+      cur = { id: head[1], title: head[2].trim(), line: i + 1, triggers: null, fix: '', level: null };
       entries.push(cur);
       return;
     }
@@ -27,6 +30,8 @@ export function parseLessons(text) {
     if (trig) cur.triggers = [...trig[1].matchAll(/`([^`]+)`/g)].map(m => toMatcher(m[1]));
     const fix = raw.match(/^- 正确做法：(.+)$/);
     if (fix) cur.fix = fix[1].trim();
+    const lv = raw.match(/^- 升级：〔(.+?)〕/);
+    if (lv && LEVELS.includes(lv[1])) cur.level = lv[1];
   });
   return entries;
 }

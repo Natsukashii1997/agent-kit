@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { haystackOf, LESSONS_FILE, matchLessons, parseLessons } from '../hooks/lessons-remind.mjs';
+import { haystackOf, LESSONS_FILE, LEVELS, matchLessons, parseLessons } from '../hooks/lessons-remind.mjs';
 
 const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
 const ids = haystack => matchLessons(lessons, haystack).map(e => e.id);
@@ -17,6 +17,12 @@ test('LESSONS 每条 G-xx 都有「触发」一行，正则能编译', () => {
   for (const m of text.matchAll(/^- 触发：(.*)$/gm))
     for (const t of m[1].matchAll(/`([^`]+)`/g))
       if (t[1].startsWith('/') && t[1].endsWith('/') && t[1].length > 2) assert.doesNotThrow(() => new RegExp(t[1].slice(1, -1)), t[1]);
+});
+
+test('LESSONS 每条 G-xx 的「升级」一行以层级词开头（#57）', () => {
+  for (const e of lessons) assert.ok(LEVELS.includes(e.level), `${e.id} 的「- 升级：」要以 ${LEVELS.map(l => `〔${l}〕`).join('')} 之一开头`);
+  assert.equal(parseLessons('## G-99 例子\n- 升级：已升级。\n')[0].level, null);
+  assert.equal(parseLessons('## G-99 例子\n- 升级：〔机检〕起步骨架。\n')[0].level, '机检');
 });
 
 test('典型命令命中对应的坑', () => {
