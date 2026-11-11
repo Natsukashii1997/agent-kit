@@ -35,21 +35,32 @@ Before implementing:
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+## 3. 代码库归你，守住三条底线
 
-**Touch only what you must. Clean up only your own mess.**
+**This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.**
+（这个代码库归你：它做什么、怎么搭由你决定，你之后还要在上面接着建。）
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+目的：AI 把代码当成别人的，就会在现有结构上继续堆、复制已有实现，看到问题只报告、不修，代码越写越乱。按主人的标准改，代码才能长期接着建。
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+**适用范围**：所有代码库，不分我自己的项目还是第三方仓库。我这一轮明确说「只改这一处」「尽量少改」时，按我说的办。
 
-The test: Every changed line should trace directly to the user's request.
+**可以直接做，不用另外请示**：
+- 合并重复实现，清理死代码和改动留下的残留；
+- 修看到的相关问题，重构结构不合理的地方；
+- 补测试和必要的文档。
+
+**三条底线，任何情况下都要守**：
+1. **已定内容照样先问**：改动会碰到我定过的东西，照第 15 节单独发「改动确认」，问完就停。顺手改动也一样。
+2. **改变已有功能的行为，必须先列出来**：动手改之前，先在消息里写清改哪个功能、原来怎样、改成怎样、为什么。只在交付清单里补一句不算「先列」。修 bug 让功能回到原定行为的不算改变行为。
+3. **交付时列全部改动**：分「你要求的」和「我顺手改的」两栏，每一处都列，小改动也不能省（AI 的总结常漏掉小改动）；改变了已有行为的，单独标出来。
+
+**照常要做**：顺手改的部分同样跑全量测试（G-03）；写法跟着项目已有的风格和约定走。
+
+**代价心里有数**：改动会变多，输出大约多五成；官方测试里，约每 6～10 次有一次会改变已有功能的行为。第 2、3 条底线就是用来兜住这些的。
+
+Codex、Hermes 同样适用（共用出处：Vault P-15）。
+
+来由：2026-11-10 常浩看到 Anthropic《Fable 5.2 提示词指南》「Say who owns the code」：写明代码库归模型后，合并重复代码的尝试从不到十分之一升到约一半。常浩决定取消原来的「Surgical Changes（只改必须改的）」和第 5 节「范围外的问题不顺手修」，换成本节，默认对所有代码库生效、不限模型，并坚守三条底线。官方只测了 Fable 5.2，其他模型的效果是推断。
 
 ## 4. Goal-Driven Execution
 
@@ -79,7 +90,6 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 守住边界：
 - 项目里规定了分工的（如 Claude 与 Codex 协作），严格按分工；不属于你职责的事，说明应该交给谁，不自己动手。
-- 发现范围外的问题，告诉我，不顺手修。
 
 控制上下文：
 - 先搜索定位，再读需要的部分；不整文件、整目录地读，不贴整份日志，命令输出只取相关部分。
@@ -245,6 +255,30 @@ Codex、Hermes 同样适用（共用出处：Vault P-13）。
 
 来由：2026-11-07 常浩提出：会阶段性换用 Claude 和 Codex，所有应用里 AI 做的功能都要在设置里讲清数据从哪来、谁产出、怎么接进来，并且能切换。
 
+## 15. 已定内容要改，先单独确认
+
+目的：我明确定过的东西，以后要改都先说清楚，等我再确认，给我留出重新考虑的空隙。
+
+**什么算已定**：我明确选定、定稿、验收过的内容，范围包括但不限于外观、动效、交互、文案、行为、数据格式、流程和规则。依据是项目交接（如 CURRENT.md）、PR、issue、记忆、Vault 里写着我「选 / 定 / 定稿 / 验收」的内容，或对话里我明确说过「就这个」「定了」。拿不准算不算，按已定处理。
+
+**什么时候要问**：动手前发现改动会改变已定内容就要问，不论是本来就要改它，还是改别处会顺带碰到它。
+
+**怎么问**：单独发一条「改动确认」，写清下面四件事。问完就停，等我明确回复，不在同一轮里先做后问：
+1. 原来怎么定的：哪天、在哪定的，当时的思路和理由；
+2. 这次要改成什么、为什么要改；
+3. 改的风险和代价：会丢掉什么、可能影响到什么；有没有不改也能达到目的的做法；
+4. 请我选：改 / 不改 / 换个改法。
+
+**批量授权**：「都做」「一口气做完」「直接通过」不算对已定内容的确认。批里只要有一项涉及已定内容，就单独摘出来照上面问，其余项照常做。
+
+**没打算改、但碰到同一处的**：交付前在真实环境里和改前对照，确认已定内容没变，界面类要截图对比。事后发现改坏了，先撤回恢复，再报告。借鉴外部项目只取做法，不照搬样子。
+
+**不用问**：我这一轮已经点名要改的那一项本身；修错字，或者修 bug 让东西回到原定的样子和行为。
+
+Codex、Hermes 同样适用（共用出处：Vault P-14）。
+
+来由：2026-11-09 驿窗借鉴上游 Agent HUD，在「直接通过」的批量授权下合进的一项，把侧栏动态小人改成了静态图标。常浩明确：定过的内容要改，必须先说明原来的思路和改的风险，再次确认；批量授权里的单项也要摘出来问。
+
 ---
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+**These guidelines are working if:** no unreported changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
