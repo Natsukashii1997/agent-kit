@@ -2,7 +2,8 @@
 // 第 4 件的一部分：每周整理的输入材料。把两样只有 agent-kit 有的数据汇成一份 Markdown，存在状态目录 weekly/ 下：
 //   1. agent-kit 自检结果（tools/doctor.mjs）；
 //   2. 近 7 天哪几条全局坑被 hook 碰到了几次（lessons-hits.jsonl），附在哪些项目、几个会话碰到的；
-//   3. 再犯（#13）：各项目 docs/LESSONS.md 里写了「再犯：G-xx」的条目，按坑汇总。这是规则写回后的效果数据，
+//   3. 再犯（#13）：各项目 docs/LESSONS.md 里写了「再犯：G-xx」的条目，按坑汇总，附该坑的层级（#57），
+//      〔文字〕〔提醒〕层又再犯的单列为升级首选。这是规则写回后的效果数据，
 //      每周一份留在 weekly/，前后几期对比就是「改进前后对比」。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 AGENT_KIT_WORK_ROOT 覆盖。
 // 会话复盘本身用 my-skills 的 session-retro（my-skills#28），这里不重复做。
 // 它只汇总、不下结论，也不写任何规则；「哪条该升级、哪个是新坑」由每周整理的人来判断，照 LESSONS「只出提案」。
@@ -69,7 +70,11 @@ export function lessonsFiles(root) {
     .map(f => ({ project: f.project, text: fs.readFileSync(f.file, 'utf8') }));
 }
 
-export function summarizeRecurrence(files, titles = {}) {
+// levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选。
+const WEAK = ['文字', '提醒'];
+
+// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）。
+export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
   const by = {};
   for (const f of files) for (const id of findRecurrences(f.text)) {
     by[id] ||= { n: 0, projects: new Set() };
@@ -79,14 +84,16 @@ export function summarizeRecurrence(files, titles = {}) {
   const rows = Object.entries(by).sort((a, b) => b[1].n - a[1].n);
   const head = `扫了 ${files.length} 个项目的 docs/LESSONS.md。`;
   if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
+  const prime = rows.filter(([id]) => WEAK.includes(levels[id])).map(([id]) => id);
   return [
     head,
     '',
-    '| 坑 | 再犯条目数 | 项目 |',
-    '|---|---|---|',
-    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${v.n} | ${[...v.projects].join('、')} |`),
+    '| 坑 | 层级 | 再犯条目数 | 项目 |',
+    '|---|---|---|---|',
+    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${levels[id] ? `〔${levels[id]}〕${statuses[id] === '部分升级' ? '部分' : ''}` : '—'} | ${v.n} | ${[...v.projects].join('、')} |`),
     '',
-    '看法提示：已升级（进全局指令、检查脚本或体检）的坑还在再犯，说明那句约束没起作用，要改写法或换去处。',
+    ...(prime.length ? [`升级首选（〔文字〕〔提醒〕层又再犯）：${prime.join('、')}。按 LESSONS「怎么升级」从〔结构〕往下找第一个做得到的层。`, ''] : []),
+    '看法提示：〔结构〕〔机检〕〔体检〕层的坑还在再犯，说明那一层没拦住，要改检查或换层；〔文字〕〔提醒〕层的再犯，就是文字没被遵守，往上升。',
   ];
 }
 
@@ -96,14 +103,17 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = process.e
 
   lines.push('## 1. agent-kit 自检', '', '```', ...formatReport(runDoctor({ dir }), new Date(now).toISOString()), '```', '');
 
-  const titles = Object.fromEntries(parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8')).map(e => [e.id, e.title]));
+  const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
+  const titles = Object.fromEntries(lessons.map(e => [e.id, e.title]));
+  const levels = Object.fromEntries(lessons.filter(e => e.level).map(e => [e.id, e.level]));
+  const statuses = Object.fromEntries(lessons.map(e => [e.id, e.status]));
   let hits = '';
   try {
     hits = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8');
   } catch {}
   lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
 
-  lines.push('## 3. 再犯', '', ...summarizeRecurrence(lessonsFiles(workRoot), titles), '');
+  lines.push('## 3. 再犯', '', ...summarizeRecurrence(lessonsFiles(workRoot), titles, levels, statuses), '');
 
   lines.push('## 4. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
   return { day, text: `${lines.join('\n')}\n` };

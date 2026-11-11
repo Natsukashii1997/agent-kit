@@ -33,8 +33,22 @@ test('再犯：两种写法都认，按坑汇总并附项目；没有就说明�
   const { findRecurrences, summarizeRecurrence, lessonsFiles } = await import('../tools/weekly-review.mjs');
   assert.deepEqual(findRecurrences('- 再犯：G-04、G-11\n说明 G-03 再犯了\n无关 G-05'), ['G-04', 'G-11', 'G-03']);
   const out = summarizeRecurrence([{ project: 'a', text: '再犯：G-04' }, { project: 'b', text: 'G-04 再犯' }, { project: 'c', text: '' }], { 'G-04': '并行会话' });
-  assert.match(out.join('\n'), /\| G-04 并行会话 \| 2 \| a、b \|/);
+  assert.match(out.join('\n'), /\| G-04 并行会话 \| — \| 2 \| a、b \|/);
+  assert.ok(!out.join('\n').includes('升级首选'));
   assert.match(summarizeRecurrence([]).join('\n'), /没有标「再犯：G-xx」/);
+  // #57：带层级列；〔文字〕〔提醒〕层又再犯的单列为升级首选，〔机检〕的不进首选
+  const lv = summarizeRecurrence(
+    [{ project: 'a', text: '再犯：G-04、G-02、G-09' }],
+    { 'G-04': '并行会话', 'G-02': '时间', 'G-09': '强调色' },
+    { 'G-04': '文字', 'G-02': '机检', 'G-09': '提醒' },
+  ).join('\n');
+  assert.match(lv, /\| G-04 并行会话 \| 〔文字〕 \| 1 \| a \|/);
+  assert.match(lv, /\| G-02 时间 \| 〔机检〕 \| 1 \| a \|/);
+  assert.match(lv, /升级首选.*G-04、G-09/);
+  assert.ok(!/升级首选.*G-02/.test(lv));
+  // 部分升级在层级列里显示「部分」（审查 P2-02）
+  const part = summarizeRecurrence([{ project: 'a', text: '再犯：G-14' }], { 'G-14': '探针' }, { 'G-14': '体检' }, { 'G-14': '部分升级' }).join('\n');
+  assert.match(part, /\| G-14 探针 \| 〔体检〕部分 \| 1 \| a \|/);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-root-'));
   fs.mkdirSync(path.join(root, 'p1', 'docs'), { recursive: true });
   fs.writeFileSync(path.join(root, 'p1', 'docs', 'LESSONS.md'), '再犯：G-01');

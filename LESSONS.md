@@ -6,17 +6,25 @@
 
 - 只收换个项目也成立的坑：不依赖某个项目的业务、页面或发布脚本。只对某个项目成立的，留在那个项目的 `docs/LESSONS.md`。
 - 从项目提升上来：写成 G-xx，编号只增不改；措辞去掉项目专有名词；「来源」写项目名、原条目号和能查的证据。原条目保留，加一行「提升：已提升为全局 G-xx（日期）」。
-- 一条一个坑，写现象、根因、正确做法、来源、出现过的项目、升级、触发。证据查不到就写「未核实」，不编。结论被推翻时改条目并注明日期，不删。
+- 一条一个坑，写现象、根因、正确做法、来源、出现过的项目、升级（开头带层级词，见「怎么升级」）、触发。证据查不到就写「未核实」，不编。结论被推翻时改条目并注明日期，不删。
 - 「触发」写碰到这条坑时命令或代码里会出现的词，每个词用反引号括起来、用顿号隔开；前后带 `/` 的按正则匹配（不分大小写）。装了 agent-kit 的 hook 后（见 [docs/机器执行层.md](docs/机器执行层.md)），Claude 和 Codex 执行的命令或要写的内容里出现这些词，就会自动收到这条坑的提醒。想不出可靠的词就写「无」并说明原因；词太宽会天天误报，宁缺毋滥。`node --test tests/*.test.mjs` 会检查每条都有「触发」一行、正则能编译。
 - 踩到已有全局坑：在项目 `docs/LESSONS.md` 的新条目里写一行「再犯：G-xx」（多条用顿号隔开），全局条目的「出现过的项目」补上。每周汇总（`tools/weekly-review.mjs`）按这一行统计再犯，用来看升级后有没有起作用。
 - 只出提案、用户批准才写：当轮交接里提，或由项目的每周整理（G 类）提。
 
 ## 怎么升级
 
-- 同一条在第二个项目又被踩到：「出现过的项目」补上；把一句话硬约束同时写进 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`（同一句，先给 diff 让用户确认），或写进 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/skeleton/`（project-starter 已迁到 my-skills）的模板或检查脚本，条目的「升级」写明去处。
-- 能用机器判定的：写进起步骨架的 `scripts/check-rules.mjs`，新项目一起步就带上。
-- 「出事了没人发现」一类（定时任务没跑、失败记录没关、服务停了）：写进本机体检（launchd、Hermes 定时任务归 my-skills 的 automation-checkup；agent-kit 自己装的东西归 `tools/doctor.mjs`），条目的「升级」写明哪一项检查。
-- 关键词提醒（「触发」一行）是每条都有的底线，不算升级。
+文字被跳过时什么都不会失败，所以升级从最硬的一层往下找，文字放最后（借鉴 pstack 的 `/correct`，#57）。
+
+- **什么时候升级**：同一条在第二个项目又被踩到（「出现过的项目」补上）；或者标着〔文字〕〔提醒〕的条目出现了「再犯」，每周汇总会把这类单列为「升级首选」。〔结构〕〔机检〕〔体检〕层的条目又再犯：先查现有机制有没有执行、为什么没拦住，能在同一层修好的先修；修不好再按下面重新选。
+- **升到哪一层**：按下面顺序找第一个做得到的层，不要求逐级往上升（〔文字〕能直接做成〔结构〕就直接做）；条目的「升级」写明去处，没选更高的层时写一句为什么做不到。
+  1. 〔结构〕让错误写不出来：改目录或接口边界、只留一种官方做法、删掉会被照抄的旧写法。
+  2. 〔机检〕在命令执行、提交、合并或发布生效之前自动报错，报错里写出正确做法。测试只有接进必经的 CI、提交前或运行前检查才算这一层，只能手动跑的不算。去处：跨项目的写进起步骨架 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/skeleton/scripts/check-rules.mjs`（新项目一起步就带上）；执行命令时就能拦的写进 agent-kit 的 hook（见 [docs/机器执行层.md](docs/机器执行层.md)）；项目里的检查脚本、CI 测试也算。已经很常见的写法只拦新增的。
+  3. 〔体检〕事后能被发现，适合「出事了没人发现」一类（定时任务没跑、失败记录没关、服务停了）：写进本机体检（launchd、Hermes 定时任务归 my-skills 的 automation-checkup；agent-kit 自己装的东西归 `tools/doctor.mjs`），写明哪一项检查。
+  4. 〔文字〕只有机器判不了的判断题才停在这层：一句话硬约束同时写进 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md`（同一句，先给 diff 让用户确认，仓库版在 `global/`），或写进起步骨架的模板。
+- 〔提醒〕只有关键词提醒（「触发」一行）：每条都有的底线，不算升级；未升级和确认不升级的条目都标这个。
+- **「升级」一行的写法**：开头是这五个层级词之一，后面写状态（未升级 / 不升级 / 部分升级 / 已升级）、日期、编号和去处；层级变了就改标签，原来的记录保留。`tests/lessons-remind.test.mjs` 会检查标签。层级只说明用什么机制，不说明管得多全：〔结构〕〔机检〕〔体检〕要写清范围（哪些项目、哪些写法）和不覆盖的部分；没管住这条坑的关键情形就写「部分升级」并写明缺口，每周汇总会把它显示成「部分」。
+- **新增机检要证明有用**：拿一次真实的历史错误让它报一次错，样本留在测试里；找不到真实样本就用构造样本，并在「升级」里注明「构造样本」。确有理由放过的，在出问题的那一行写豁免，带理由、到期日和常浩的批准。
+- **升上去之后**：原来是〔文字〕的条目被〔结构〕或〔机检〕覆盖后，全局指令里那句缩成一行指针（同样先给 diff 让用户确认）。
 
 ---
 
@@ -27,7 +35,7 @@
 - 正确做法：证据放项目约定的持久目录（如 `~/Library/Application Support/<项目>/evidence/<目录名>/`），位置写进项目 AGENTS.md；会话临时目录只放用完即弃的文件。
 - 来源：work-desk L-02（`docs/history/CURRENT-through-20261022.md` 开头的 2026-10-23 补注）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`/(^|[^\w/])\/tmp\//`（只认直接写到 /tmp/ 的路径；Claude 自己的临时目录 /private/tmp/claude-… 和 os.tmpdir() 不算）
 
 ## G-02 页面直接截取 ISO 时间字符串，把 UTC 当本地时间显示（2026-10-24 提升）
@@ -37,7 +45,7 @@
 - 正确做法：显示一律经一个格式化函数按 `Asia/Shanghai` 转换（函数名写进项目 AGENTS.md 的规则），测试覆盖跨日、跨年；能机检就加检查规则。
 - 来源：work-desk L-03（提交 `3200d0e`；2026-10-23 每周整理试跑又发现 3 处）。
 - 出现过的项目：work-desk。
-- 升级：已升级：起步骨架 `scripts/check-rules.mjs` 的 time 规则（project-starter 早已带上；2026-11-07 #15 补记）。
+- 升级：〔机检〕已升级：起步骨架 `scripts/check-rules.mjs` 的 time 规则（project-starter 早已带上；2026-11-07 #15 补记）。范围：用了起步骨架 `check-rules.mjs` 的项目；只认已定义的写法，写法变体和没装这条规则的存量项目不覆盖。
 - 触发：`/\.slice\(\s*(0\s*,\s*1[06]|5\s*,\s*16|11\s*,\s*16)\s*\)/`、`/replace\(\s*['"]T['"]\s*,\s*['"] ['"]/`
 
 ## G-03 改了脚本只做语法或单条路径验证，没跑全量测试（2026-10-24 提升）
@@ -47,7 +55,7 @@
 - 正确做法：改 `scripts/` 下任何脚本也跑全量测试；有测试截取脚本执行的，新增外部命令时在测试里补桩和断言。
 - 来源：work-desk L-06（提交 `b5c212d` 引入，修复是测试里补的桩）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`/scripts\/[^\s]+\.(sh|mjs|js|py)/`
 
 ## G-04 并行会话共用一个工作区，测试互相污染、提交带上别人的改动（2026-10-24 提升）
@@ -57,7 +65,7 @@
 - 正确做法：并行的会话各开独立 worktree。做不到时：测试记录写明「工作区含他人未提交改动」；提交只含自己的文件（`git commit -- <文件>`）；同一文件里有别人的改动时只暂存自己的块——`git diff -U0 <文件>` 看分块，把自己的块写成补丁 `git apply --cached`，或 `git show HEAD:<文件>` 加上自己的改动后 `git hash-object -w --stdin`、再 `git update-index --cacheinfo 100644,<哈希>,<文件>`；暂存后 `git diff --cached` 再核一遍。不用裸 `git stash`（各 worktree 共用一个 stash 栈）。
 - 来源：work-desk L-07（2026-10-23 首次；2026-10-24 提交 `359ac18` 再犯）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`git stash`、`git add -A`、`git add --all`、`git add .`
 
 ## G-05 launchd 里用 /bin/bash 读不了「文稿」下的脚本（2026-10-24 提升）
@@ -67,7 +75,7 @@
 - 正确做法：要读 `~/Documents` 等受保护目录的 launchd 任务，借已有文稿权限的程序启动（如应用外壳里的 node），或把脚本和数据放到非受保护目录；装好后一定用 `launchctl kickstart` 真实触发一次再看日志，不能只在终端里试。
 - 来源：work-desk L-08（`scripts/health-check.sh` 的 `--install`；证据 `~/Library/Application Support/NiumaHome/evidence/每日巡检-20261023/`）。
 - 出现过的项目：work-desk。
-- 升级：已升级：本机体检 automation-checkup 早已覆盖（程序在「文稿」等受保护文件夹时提示、退出码 126 解释；2026-11-07 #15 补记）。
+- 升级：〔体检〕已升级：本机体检 automation-checkup 早已覆盖（程序在「文稿」等受保护文件夹时提示、退出码 126 解释；2026-11-07 #15 补记）。
 - 触发：`launchctl`、`LaunchAgents`、`/\.plist\b/`
 
 ## G-06 PlistBuddy 找不到文件时把提示打到标准输出（2026-10-24 提升）
@@ -77,7 +85,7 @@
 - 正确做法：先 `[ -f "$plist" ]` 再读。
 - 来源：work-desk L-09（`scripts/health-check.sh` 读数据目录那几行）。
 - 出现过的项目：work-desk。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：`PlistBuddy`
 
 ## G-07 本机服务只监听 127.0.0.1，仍挡不住浏览器里任意网页发来的请求（2026-10-24 提升）
@@ -87,7 +95,7 @@
 - 正确做法：来源校验（Host 是本机、Origin 同源）、正文大小上限、统一错误响应放服务入口，对全部写接口生效；模块里只做自己的业务校验（如配对码）。
 - 来源：work-desk L-11（`server/http.mjs` 的 `checkOrigin`、`tests/request-guard.test.mjs`）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 origin 规则（开了 `.listen(` 的文件里找不到 Origin/Host 校验就报），见 my-skills#49 / PR #50。
+- 升级：〔机检〕已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 origin 规则（开了 `.listen(` 的文件里找不到 Origin/Host 校验就报），见 my-skills#49 / PR #50。范围：用了起步骨架 `check-rules.mjs` 的项目；只认已定义的写法，写法变体和没装这条规则的存量项目不覆盖。有 Origin/Host 相关代码，不等于每个写接口都校验对了。
 - 触发：`.listen(`、`createServer(`
 
 ## G-08 `set -u` 脚本里可选开关裸引用，变量不设就整段退出（2026-10-24 提升）
@@ -97,7 +105,7 @@
 - 正确做法：可选开关一律写 `${OPT:-}`；改带 `set -u` 的脚本后，开关设与不设各跑一遍。
 - 来源：work-desk L-12（`~/Library/Application Support/NiumaHome/evidence/全面优化-20261023/release.log`；修复提交 `359ac18`）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 optional-var 规则（带 `set -u` 的脚本里 `[ -n "$X" ]` / `[ -z "$X" ]` 没写 `${X:-}` 就报），见 my-skills#49 / PR #50。
+- 升级：〔机检〕已升级（2026-11-07，#15）：起步骨架 `scripts/check-rules.mjs` 新增 optional-var 规则（带 `set -u` 的脚本里 `[ -n "$X" ]` / `[ -z "$X" ]` 没写 `${X:-}` 就报），见 my-skills#49 / PR #50。范围：用了起步骨架 `check-rules.mjs` 的项目；只认已定义的写法，写法变体和没装这条规则的存量项目不覆盖。
 - 触发：`/\bset -[a-z]*u/`
 
 ## G-09 改界面时把原有强调色、状态样式改没了（2026-10-24 提升）
@@ -107,7 +115,7 @@
 - 正确做法：只动用户点名的部分；改已有组件前先看清会影响哪些类名、条件、颜色；改前截图，改完对照截图逐项核对颜色与强调。
 - 来源：work-desk L-01（用户 2026-10-18 当面反馈；对应提交未核实）。
 - 出现过的项目：work-desk。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：无（界面改动太泛，靠人记）
 
 ## G-10 外部只读来源每次现读，页面每次打开都要等（2026-10-24 提升）
@@ -117,7 +125,7 @@
 - 正确做法：接外部只读来源一律落快照：页面先回旧快照，过期了后台刷新；只有用户点「刷新」才现读，不让用户等外部来源。
 - 来源：work-desk L-10（`docs/handoff/UI与功能审核-20261023/审核记录.md` 第 3、4 条；`tests/mentor-snapshot.test.mjs`、`tests/reports-persist.test.mjs`）。
 - 出现过的项目：work-desk。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：`feishu`、`larksuite`
 
 ## G-11 无头 Chrome 截图与合成事件不可靠：样式没加载完、焦点事件不发（2026-10-24 提升）
@@ -127,7 +135,7 @@
 - 正确做法：要等页面画完再截的图，用调试协议（`--remote-debugging-port` + `Runtime.evaluate` 轮询「目标元素已画出 + `document.fonts.status === "loaded"`」，再 `Page.captureScreenshot` 按元素区域截）；键盘、鼠标交互一律用真实输入（`Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`，或浏览器里的真实按键），不拿合成事件的结果当证据。
 - 来源：work-desk L-13（`~/Library/Application Support/NiumaHome/evidence/折线图数值与悬停-20261024/` 的 `cdp-shot.mjs`、`cdp-debug.mjs`）。
 - 出现过的项目：work-desk。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`--headless`、`--screenshot`、`virtual-time-budget`、`new KeyboardEvent`
 
 ## G-12 电脑重启，会话里等着到点再跑的后台任务落空，也没人发现（2026-10-24 新增）
@@ -142,7 +150,7 @@
   - 发现电脑重启过（看 `sysctl kern.boottime`），把同一时间停掉的本机服务和实验进程一并查出来，告诉用户。
 - 来源：github-center 2026-10-24（`CURRENT.md` 2026-10-24 10:40 条；Issue #11 完成记录的“真实运行”一节）。
 - 出现过的项目：github-center。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`nohup`、`disown`、`/sleep\s+\d{4,}/`、`kern.boottime`
 
 ## G-13 回退测试用了不存在的模型名，留下长期冷却，辅助任务全部掉到回退模型（2026-10-27 新增）
@@ -156,7 +164,7 @@
   - 巡检只查主对话回退时，辅助任务回退是盲区，要看日志里的辅助任务回退记录。
 - 来源：digital-twin 2026-10-27（`CURRENT.md`「Hermes 辅助任务改回 Codex」一节；证据 `~/Library/Application Support/DigitalTwin/evidence/hermes-aux-codex-20261027/`）。
 - 出现过的项目：digital-twin。
-- 升级：已升级：数字分身每日巡检 `ops/health_check.py` 的回退模型与 Codex 凭证检查早已覆盖，提示里直接指向本条（2026-11-07 #15 补记）。
+- 升级：〔体检〕已升级：数字分身每日巡检 `ops/health_check.py` 的回退模型与 Codex 凭证检查早已覆盖，提示里直接指向本条（2026-11-07 #15 补记）。
 - 触发：`hermes auth`、`model_cooldowns`
 
 ## G-14 删了一次性探针定时任务，它失败留下的记录还在，巡检第二天误报（2026-10-28 新增）
@@ -169,7 +177,7 @@
   - 巡检规则的自测要覆盖“只有已处理记录”这种情况，不只测空列表和有问题两种。
 - 来源：digital-twin 2026-10-28（`CURRENT.md`「首日运行核对；巡检定时任务误报修复」一节；修复 PR #24 `38a8b7e`）。
 - 出现过的项目：digital-twin。
-- 升级：部分升级（2026-11-07，#15）：数字分身每日巡检会报未处理的失败记录，但不区分是否属于已删除的任务；补这一项见 digital-twin#62。
+- 升级：〔体检〕部分升级（2026-11-07，#15）：数字分身每日巡检会报未处理的失败记录，但不区分是否属于已删除的任务；补这一项见 digital-twin#62。
 - 触发：`hermes cron`
 
 ## G-15 改了 Safari「添加到程序坞」网页应用的包内文件再重签，应用打不开（2026-10-28 新增）
@@ -183,7 +191,7 @@
   - 动包之前先整份 `ditto` 备份；改完必须实际打开一次，`codesign --verify` 通过不代表能启动。
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 程序坞应用图标换成『A 数码夜景』」一节；交接 `docs/agents/handoffs/2026-10-28-claude-app-icon.md`；提交 `60856de`）。
 - 出现过的项目：personal-ai-workbench。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：`codesign`、`.app/Contents`、`ApplicationIcon`
 
 ## G-16 Safari「添加到程序坞」网页应用打开时用磁盘里的旧首页：发布换了哈希就黑屏，刷新才好（2026-10-28 新增）
@@ -197,7 +205,7 @@
   - 根治（2026-10-31 补）：程序坞入口改成原生 WKWebView 外壳。外壳每次启动自己加载首页，按正常 HTTP 缓存规则走，不会恢复网页应用磁盘里的旧首页；还能自带图标（不受 G-15 限制），也能用按需下载的系统字体。外壳有自己的网页存储，网页应用里的 localStorage 带不过来，换之前先确认没有未保存草稿。目前只验证过换完后打开不黑，还没经过一次发布，未核实。参考写法：personal-ai-workbench `desktop/app-shell/`（PR #45）、work-desk `desktop/macos/NiumaHome.swift`。
 - 来源：personal-ai-workbench 2026-10-28（`CURRENT.md`「Claude 发布到正式 5178（wb-20261028-671）」一节；提交 `dd3b395`）；work-desk L-16（提交 `533cb89`，同为网页应用，未踩到、预防性修改）。
 - 出现过的项目：personal-ai-workbench（踩到）；work-desk（同类风险，预防修改）。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：`Cache-Control`、`no-cache`
 
 ## G-17 WKWebView 窗口壳的「重新载入」菜单被 WKWebView 自己接走，外壳写的处理不执行（2026-10-31 新增）
@@ -210,7 +218,7 @@
   - 相关：WKWebView 退出、关窗时不触发 `beforeunload`，也不替页面弹离开确认（公开 API 没有对应的 UI 代理方法）。要保护页面里没保存的内容，就在 ⌘Q、⌘W、⌘R 之前自己在页面里派发一次 `beforeunload`，看 `defaultPrevented`，拦下了就弹原生确认框。
 - 来源：personal-ai-workbench 2026-10-31（`desktop/app-shell/DigitalWorld.swift`，PR #45；交接 `docs/agents/handoffs/2026-10-31-claude-native-app-shell-676.md`。调试实测：未设 target 时，自己的处理执行次数为 0）。
 - 出现过的项目：personal-ai-workbench（踩到，已修）；work-desk（`desktop/macos/NiumaHome.swift` 同样写法，未修，未实测）。
-- 升级：不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
+- 升级：〔提醒〕不升级（2026-11-07，#15，常浩确认）：平台或写法上的个例，只保留关键词提醒；同一条在第二个项目再踩到时重新评估。
 - 触发：`WKWebView`、`reload:`
 
 ## G-18 launchctl bootout 返回时任务还没卸完，马上 bootstrap 报「Bootstrap failed: 5」，任务没装回去（2026-11-03 新增）
@@ -223,7 +231,7 @@
   - 重装完 `launchctl print` 看每个任务都在、常驻服务 state = running，再真实触发一次（同 G-05）。
 - 来源：github-center 2026-11-03（`scripts/schedule.sh install` 重装时网站任务没装回、停了几十秒，手动 bootstrap 恢复；修复 PR #45，用假 launchctl 复现旧脚本失败、新脚本通过）。
 - 出现过的项目：github-center（踩到，已修）。
-- 升级：已升级：本机体检 automation-checkup 的「没加载，不会运行」检查早已覆盖结果（任务没装回会被报出；2026-11-07 #15 补记）。
+- 升级：〔体检〕已升级：本机体检 automation-checkup 的「没加载，不会运行」检查早已覆盖结果（任务没装回会被报出；2026-11-07 #15 补记）。
 - 触发：`launchctl bootout`、`launchctl bootstrap`
 
 ## G-19 launchd 起的服务读不到终端里的代理变量，直连被 DNS 污染，请求一直超时（2026-11-05 新增）
@@ -237,7 +245,7 @@
   - Hermes 网关的代理同时写进对应 profile 的 `.env`（`~/.hermes/.env`、`~/.hermes/profiles/<名>/.env`），以 `.env` 为准：网关启动时会把它读进进程环境并覆盖已有值，plist 被重写也不丢。只想重启进程、不想动 plist 时，用 `launchctl kickstart -k gui/<uid>/<label>`，不用 `hermes gateway restart`。
 - 来源：Hermes 亚古兽网关 2026-11-05（本机服务，没有项目仓库；改前备份 `~/.hermes/backups/ai.hermes.gateway-agumon.plist.bak-20261105`；补代理变量并重启后，那条卡住的消息 4.6 秒回复成功）。
 - 出现过的项目：Hermes 本机网关（踩到 2 次，都已修；第 2 次见 #17，改前备份 `~/.hermes/backups/ai.hermes.gateway.plist.bak-20261107`，`.env` 备份在同一目录）。
-- 升级：已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`HTTPS_PROXY`、`https_proxy`、`EnvironmentVariables`、`gateway install`
 
 ## G-20 Mac 睡眠时定时任务照样“在跑”，但慢到被自己的超时或租约强制中断（2026-11-07 新增）
@@ -252,7 +260,7 @@
   - 失败后别只等下一期：这一期漏掉的产出要么补跑，要么在记录里写明不补，避免以为已经有了。
 - 来源：Hermes 本机定时任务 2026-11-02（本机服务，没有项目仓库；`~/.hermes/logs/agent.log` 当天 08:30–09:14 的 API 调用耗时与租约中断记录，`~/.hermes/cron/output/6a976baa2632/2026-11-02_09-14-00.md`，`pmset -g log` 当天 07:00–09:14 的睡眠记录；租约时长见 `hermes-agent/agent/turn_facade_lease.py` 的 `LEASE_TTL_SECONDS = 300`）。agent-kit#31。
 - 出现过的项目：Hermes 本机定时任务。
-- 升级：未升级。可选去处：本机体检（my-skills 的 automation-checkup）在报定时任务失败时，顺带查失败时段的 `pmset` 睡眠记录，直接说明“当时机器在睡”。
+- 升级：〔提醒〕未升级。可选去处：本机体检（my-skills 的 automation-checkup）在报定时任务失败时，顺带查失败时段的 `pmset` 睡眠记录，直接说明“当时机器在睡”。
 - 触发：`pmset`、`DarkWake`、`/waiting for model response/`、`/turn lease/`
 
 ## G-21 从程序里跳去本机另一个应用，用 https 链接被默认浏览器在后台接走，目标应用不出来（2026-11-07 提升）
@@ -265,7 +273,7 @@
   - 验收「跳转」要看目标应用有没有到前台、打开到哪里：`osascript -e 'tell application "System Events" to get frontmost of (first process whose bundle identifier is "<bundle id>")'` 看到前台；打开到哪个页面请用户目视，或拿到该应用的截图授权。
 - 来源：postpane L-22（`docs/LESSONS.md`，#198；本机三次实测：`open https://…`、`open lark://…` 后前台仍是原应用，`open feishu://…` 后飞书 `frontmost` 为 `true`，常浩确认打开的是那个群）。
 - 出现过的项目：postpane。
-- 升级：未升级。
+- 升级：〔提醒〕未升级。
 - 触发：`applink`、`CFBundleURLSchemes`、`LSCopyDefaultApplicationURLForURL`、`/deep ?link/`
 
 ## G-22 把「请求发出去了」当成「成功」，界面随即改状态，用户没到那里也拿不回来（2026-11-08 提升）
@@ -280,7 +288,7 @@
   - 失败提示放在用户正在看的那个窗口里。验收时照 G-21 看目标有没有真的到前台、打开到哪里。
 - 来源：postpane L-25（`docs/LESSONS.md`，postpane#227、#228、#230；全操作审核汇总在本机 `~/Library/Application Support/postpane/evidence/2026-11-07-ops-audit/汇总.md`，本机最近 100 个会话里 57 个会走「只叫起应用算成功」）。
 - 出现过的项目：postpane。
-- 升级：未升级。
+- 升级：〔提醒〕未升级。
 - 触发：无（这类坑出现在任何「做完就改状态」的代码里，没有可靠的固定词，宁缺毋滥）。
 
 ## G-23 几个 worktree 共用 CARGO_TARGET_DIR，测试跑的是别的 worktree 编出的代码（2026-11-08 提升）
@@ -293,7 +301,7 @@
   - 多个 PR 连着合并后，在主目录用 main 自己的构建目录跑一次全量再发布。
 - 来源：postpane L-26（`docs/LESSONS.md`，postpane#235；`~/Library/Application Support/postpane/evidence/2026-11-07-fix-220/main-f441f73-cargo-test.log` 主目录补验 765 = 761 + 4，而共享目录那次报 761）。
 - 出现过的项目：postpane。
-- 升级：未升级。
+- 升级：〔提醒〕未升级。
 - 触发：`CARGO_TARGET_DIR`
 
 ## G-24 Claude 桌面版回收空闲会话的进程，打开会话也不会重新跑起来（2026-11-09 提升）
@@ -306,7 +314,7 @@
   - 先撤回已排队的话再续接，撤回不了（已被领走）就不续接，防止同一段话送两遍。
 - 来源：postpane L-14 补正（`docs/LESSONS.md`，postpane#175、PR #177）；证据 `~/Library/Application Support/postpane/evidence/2026-11-07-{bg-wait,link-wake,headless-resume}/`（日志摘录、打开链接只预热、后台续接 12 秒完成），实机全流程 `~/Library/Application Support/postpane/evidence/2026-11-09-wake-live/watch.log`（停进程后 ChatGPT 判需修改，后台续接改完交回复审，通过）。
 - 出现过的项目：postpane。
-- 升级：未升级。
+- 升级：〔提醒〕未升级。
 - 触发：`CliGovernor`、`governor_evict`、`claude-code-sessions`、`/claude -p --resume/`
 
 ## G-25 Claude 桌面版里 Bash 被内置「危险 rm」检查要求批准，批准没地方点，约 16 分钟后会话被判 stopped responding（2026-11-09 提升）
@@ -323,5 +331,5 @@
   - 弹了「stopped responding」，先在 `main.log` 搜 `timed out after`，看 `last_tool_name` 和 `outstanding_host_request`。
 - 来源：postpane L-37、L-41；agent-kit#49（PR #50）。近 14 天会话记录 66280 条 Bash，30 条被这个检查拦、11 条卡到会话断开；证据 `~/Library/Application Support/agent-kit/evidence/2026-11-09-49-bash-precheck/`（26 条真实 Claude Code 探针、装机前后两次端到端记录、语料评估）。
 - 出现过的项目：postpane、carvomoto；语料里 work-desk、github-center、my-skills、personal-ai-workbench 的会话也被拦过。
-- 升级：机器拦截，`hooks/bash-precheck.mjs`（#49）在执行前当场拒绝这几类写法并给出改写；`tools/doctor.mjs` 查装没装、实跑一次。
+- 升级：〔机检〕机器拦截，`hooks/bash-precheck.mjs`（#49）在执行前当场拒绝这几类写法并给出改写；`tools/doctor.mjs` 查装没装、实跑一次。
 - 触发：`stopped responding`、`timed out after`、`outstanding_host_request`
