@@ -73,7 +73,8 @@ export function lessonsFiles(root) {
 // levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选。
 const WEAK = ['文字', '提醒'];
 
-export function summarizeRecurrence(files, titles = {}, levels = {}) {
+// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）。
+export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
   const by = {};
   for (const f of files) for (const id of findRecurrences(f.text)) {
     by[id] ||= { n: 0, projects: new Set() };
@@ -89,7 +90,7 @@ export function summarizeRecurrence(files, titles = {}, levels = {}) {
     '',
     '| 坑 | 层级 | 再犯条目数 | 项目 |',
     '|---|---|---|---|',
-    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${levels[id] ? `〔${levels[id]}〕` : '—'} | ${v.n} | ${[...v.projects].join('、')} |`),
+    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${levels[id] ? `〔${levels[id]}〕${statuses[id] === '部分升级' ? '部分' : ''}` : '—'} | ${v.n} | ${[...v.projects].join('、')} |`),
     '',
     ...(prime.length ? [`升级首选（〔文字〕〔提醒〕层又再犯）：${prime.join('、')}。按 LESSONS「怎么升级」从〔结构〕往下找第一个做得到的层。`, ''] : []),
     '看法提示：〔结构〕〔机检〕〔体检〕层的坑还在再犯，说明那一层没拦住，要改检查或换层；〔文字〕〔提醒〕层的再犯，就是文字没被遵守，往上升。',
@@ -105,13 +106,14 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = process.e
   const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
   const titles = Object.fromEntries(lessons.map(e => [e.id, e.title]));
   const levels = Object.fromEntries(lessons.filter(e => e.level).map(e => [e.id, e.level]));
+  const statuses = Object.fromEntries(lessons.map(e => [e.id, e.status]));
   let hits = '';
   try {
     hits = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8');
   } catch {}
   lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
 
-  lines.push('## 3. 再犯', '', ...summarizeRecurrence(lessonsFiles(workRoot), titles, levels), '');
+  lines.push('## 3. 再犯', '', ...summarizeRecurrence(lessonsFiles(workRoot), titles, levels, statuses), '');
 
   lines.push('## 4. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
   return { day, text: `${lines.join('\n')}\n` };

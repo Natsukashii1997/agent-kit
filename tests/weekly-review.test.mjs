@@ -46,6 +46,9 @@ test('再犯：两种写法都认，按坑汇总并附项目；没有就说明�
   assert.match(lv, /\| G-02 时间 \| 〔机检〕 \| 1 \| a \|/);
   assert.match(lv, /升级首选.*G-04、G-09/);
   assert.ok(!/升级首选.*G-02/.test(lv));
+  // 部分升级在层级列里显示「部分」（审查 P2-02）
+  const part = summarizeRecurrence([{ project: 'a', text: '再犯：G-14' }], { 'G-14': '探针' }, { 'G-14': '体检' }, { 'G-14': '部分升级' }).join('\n');
+  assert.match(part, /\| G-14 探针 \| 〔体检〕部分 \| 1 \| a \|/);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-root-'));
   fs.mkdirSync(path.join(root, 'p1', 'docs'), { recursive: true });
   fs.writeFileSync(path.join(root, 'p1', 'docs', 'LESSONS.md'), '再犯：G-01');

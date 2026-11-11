@@ -14,14 +14,17 @@ export const LESSONS_FILE = path.resolve(HERE, '..', 'LESSONS.md');
 // 「升级」一行开头的层级词，从强到弱（LESSONS「怎么升级」，#57）
 export const LEVELS = ['结构', '机检', '体检', '文字', '提醒'];
 
-// 解析 LESSONS.md：每条 { id, title, line, triggers: [字符串或正则], fix, level: LEVELS 之一或 null }
+// 「升级」一行标签后面的状态词；不是这三个开头的都算「已升级」
+const STATUSES = ['未升级', '不升级', '部分升级'];
+
+// 解析 LESSONS.md：每条 { id, title, line, triggers: [字符串或正则], fix, level: LEVELS 之一或 null, status }
 export function parseLessons(text) {
   const entries = [];
   let cur = null;
   text.split('\n').forEach((raw, i) => {
     const head = raw.match(/^## (G-\d+) (.+?)(?:（\d{4}-\d{2}-\d{2}[^）]*）)?\s*$/);
     if (head) {
-      cur = { id: head[1], title: head[2].trim(), line: i + 1, triggers: null, fix: '', level: null };
+      cur = { id: head[1], title: head[2].trim(), line: i + 1, triggers: null, fix: '', level: null, status: null };
       entries.push(cur);
       return;
     }
@@ -30,8 +33,11 @@ export function parseLessons(text) {
     if (trig) cur.triggers = [...trig[1].matchAll(/`([^`]+)`/g)].map(m => toMatcher(m[1]));
     const fix = raw.match(/^- 正确做法：(.+)$/);
     if (fix) cur.fix = fix[1].trim();
-    const lv = raw.match(/^- 升级：〔(.+?)〕/);
-    if (lv && LEVELS.includes(lv[1])) cur.level = lv[1];
+    const up = raw.match(/^- 升级：(?:〔(.+?)〕)?\s*(.*)$/);
+    if (up) {
+      if (LEVELS.includes(up[1])) cur.level = up[1];
+      cur.status = STATUSES.find(s => up[2].startsWith(s)) || '已升级';
+    }
   });
   return entries;
 }
