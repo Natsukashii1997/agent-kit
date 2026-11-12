@@ -78,7 +78,14 @@ function checkHooks({ home, run, env, dir }) {
   const promptCmds = (settings.hooks?.UserPromptSubmit || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
   const hasNudge = hookCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs')) && promptCmds.some(c => c.includes('hooks/thinking-review-nudge.mjs'));
   const hasPrecheck = hookCmds.some(c => c.includes('hooks/bash-precheck.mjs'));
-  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、5 个 hook 都在`] });
+  // 首轮整理（#65）：启动和发消息两处都要指向 runtime 副本，真实配置要在状态目录
+  const ORGANIZE = 'hooks/session-organize-once/session_organize_once.py';
+  const startCmds = (settings.hooks?.SessionStart || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
+  const runtimeHooks = path.join(dir, 'runtime', 'hooks');
+  const organizeOk = cmds => cmds.some(c => c.includes(ORGANIZE) && c.includes(runtimeHooks));
+  const hasOrganize = organizeOk(startCmds) && organizeOk(promptCmds);
+  const organizeConfig = fs.existsSync(path.join(dir, 'session-organize-once', 'config.json'));
+  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、6 个 hook 都在，首轮整理配置在状态目录`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -90,6 +97,8 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
         ...(!hasPrecheck ? ['没装 bash-precheck（Bash 预检，防会话卡在没人点的安全检查批准上）'] : []),
+        ...(!hasOrganize ? ['首轮整理钩子没装，或还指向 ~/.claude/hooks 下的旧位置（启动和发消息两处都要指向 runtime 副本）'] : []),
+        ...(!organizeConfig ? ['状态目录里没有首轮整理配置 session-organize-once/config.json'] : []),
         '装法：node tools/install.mjs --apply',
       ],
     });
@@ -113,7 +122,7 @@ function checkHooks({ home, run, env, dir }) {
   // 装的是状态目录 runtime/ 里的副本：仓库里改了 hooks/ 或 LESSONS.md（比如加了新坑的「触发」行），要重装才生效
   const runtime = path.join(dir, 'runtime');
   if (hasGuard || hasRemind) {
-    const files = ['LESSONS.md', ...fs.readdirSync(path.join(KIT, 'hooks'), { recursive: true }).filter(f => f.endsWith('.mjs')).map(f => path.join('hooks', f))];
+    const files = ['LESSONS.md', ...fs.readdirSync(path.join(KIT, 'hooks'), { recursive: true }).filter(f => (f.endsWith('.mjs') || f.endsWith('.py')) && !f.includes('__pycache__')).map(f => path.join('hooks', f))];
     const stale = files.filter(f => readText(path.join(KIT, f)) !== readText(path.join(runtime, f)));
     results.push(
       stale.length

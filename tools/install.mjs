@@ -5,8 +5,10 @@
 //   node tools/install.mjs --uninstall [--apply]   去掉 agent-kit 加的东西，别的设置原样保留
 //   --only claude | --only codex      只装一边
 //   --allow-any-branch                允许不在 main 上装（只给测试和有意为之时用）
-// 改的文件：~/.claude/settings.json（permissions.deny / ask、hooks.PreToolUse、hooks.PostToolUse 里的 skill-usage、hooks.UserPromptSubmit 里的 thinking-review-nudge）、
+// 改的文件：~/.claude/settings.json（permissions.deny / ask、hooks.PreToolUse、hooks.PostToolUse 里的 skill-usage、
+//          hooks.UserPromptSubmit 里的 thinking-review-nudge 和首轮整理、hooks.SessionStart 里的首轮整理）、
 //          ~/.codex/hooks.json（hooks.PreToolUse）、~/.codex/rules/agent-kit.rules。
+// 首轮整理钩子（#65）的真实配置放状态目录 session-organize-once/config.json，不进仓库；没有时从旧位置迁移或拷示例，已有的不覆盖。
 // 写之前把原文件备份到状态目录 backups/<时间>/；hook 脚本和 LESSONS.md 复制到状态目录 runtime/ 再指向那里，
 // 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
 // 本次新增了哪些权限规则记在状态目录 install-manifest.json，卸载只删这些，你自己原有的同名规则不动。
@@ -18,10 +20,47 @@ import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs'];
+const ORGANIZE = 'session-organize-once/session_organize_once.py';
+// 旧路径 ~/.claude/hooks/session-organize-once/… 也带「hooks/session-organize-once/…」，重装时会被认出来换掉
+const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs', ORGANIZE];
 const TIMEOUT_SEC = 10;
+const ORGANIZE_TIMEOUT_SEC = 5;
+export const ORGANIZE_LEGACY_DIR = home => path.join(home, '.claude', 'hooks', 'session-organize-once');
 
 export const isOurHook = h => typeof h?.command === 'string' && HOOK_FILES.some(f => h.command.includes(`hooks/${f}`));
+
+// Python 也用不随版本变的入口：python.org 安装包的 Versions/Current、Homebrew 的 bin
+export function stablePython(exists = fs.existsSync) {
+  for (const p of ['/Library/Frameworks/Python.framework/Versions/Current/bin/python3', '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3']) if (exists(p)) return p;
+  return 'python3';
+}
+
+// 首轮整理钩子的命令：脚本在 runtime 副本里，配置和运行记录在状态目录（base 是状态目录下的 runtime/）
+export function organizeCommand(python, base) {
+  const dir = path.join(path.dirname(base), 'session-organize-once');
+  return `"${python}" "${path.join(base, 'hooks', ORGANIZE)}" --config "${path.join(dir, 'config.json')}" --state-dir "${path.join(dir, 'state')}"`;
+}
+
+const organizeHook = (python, base) => ({ type: 'command', command: organizeCommand(python, base), timeout: ORGANIZE_TIMEOUT_SEC, statusMessage: '整理新会话' });
+
+// 新会话启动时的 hook（SessionStart）：只有 Claude 桌面应用的首轮整理（#65）
+export function ourStartGroups(tool, python = stablePython(), base = KIT) {
+  if (tool !== 'claude') return [];
+  return [{ matcher: 'startup|fork', hooks: [organizeHook(python, base)] }];
+}
+
+// 首轮整理的真实配置：已有就不动；没有就从旧位置迁移，再没有就拷示例。返回一句说明
+export function ensureOrganizeConfig(sd, home, { write = false, kit = KIT } = {}) {
+  const dest = path.join(sd, 'session-organize-once', 'config.json');
+  if (fs.existsSync(dest)) return `首轮整理配置已在 ${dest}，不动`;
+  const legacy = path.join(ORGANIZE_LEGACY_DIR(home), 'config.json');
+  const src = fs.existsSync(legacy) ? legacy : path.join(kit, 'config', 'session-organize-once.example.json');
+  if (write) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+  }
+  return src === legacy ? `首轮整理配置从旧位置 ${legacy} 迁移到 ${dest}` : `首轮整理配置还没有，拷示例到 ${dest}（分区和项目要按本机改）`;
+}
 
 // Homebrew 的 node 真实路径带版本号（/opt/homebrew/Cellar/node/<版本>/bin/node），升级后旧路径会消失、hook 就静默失效；
 // 优先用不随版本变的入口。
@@ -44,10 +83,13 @@ export function ourHookGroups(tool, node = stableNode(), base = KIT) {
   ];
 }
 
-// 用户发消息时的 hook（UserPromptSubmit）：目前只有 Claude 的 thinking-review 准入提醒（#35）
-export function ourPromptGroups(tool, node = stableNode(), base = KIT) {
+// 用户发消息时的 hook（UserPromptSubmit）：只有 Claude 的 thinking-review 准入提醒（#35）和首轮整理（#65）
+export function ourPromptGroups(tool, node = stableNode(), base = KIT, python = stablePython()) {
   if (tool !== 'claude') return [];
-  return [{ hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'thinking-review-nudge.mjs')}"`, timeout: TIMEOUT_SEC }] }];
+  return [
+    { hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'thinking-review-nudge.mjs')}"`, timeout: TIMEOUT_SEC }] },
+    { hooks: [organizeHook(python, base)] },
+  ];
 }
 
 // 调用后记账的 hook（PostToolUse）：目前只有 Claude 的 skill 调用日志；Codex 没有 Skill 工具，由 my-skills 月度体检读会话记录补
@@ -93,7 +135,7 @@ function readJson(file) {
 const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
 
 // 装之前先让两个 hook 各跑一次，确认在这台电脑上能用。只测脚本本身；写进设置的那条命令能不能跑，由 tools/doctor.mjs 测。
-export function selfTest(base = KIT, node = process.execPath) {
+export function selfTest(base = KIT, node = process.execPath, python = stablePython()) {
   const run = (file, input) =>
     spawnSync(node, [path.join(base, 'hooks', file)], {
       input: JSON.stringify(input),
@@ -112,6 +154,18 @@ export function selfTest(base = KIT, node = process.execPath) {
   if (t.status !== 0 || !String(t.stdout).includes('thinking-review')) problems.push(`thinking-review-nudge 没对「思维评审」给出提醒（退出码 ${t.status}，${t.stderr || t.stdout}）`);
   const b = run('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } });
   if (b.status !== 0 || !String(b.stdout).includes('"deny"')) problems.push(`bash-precheck 没拦下 rm 变量加通配符（退出码 ${b.status}，${b.stderr || b.stdout}）`);
+  // 首轮整理（#65）：Python 能跑、示例配置能读；不在桌面应用里时应原样放行（输出 {}）
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-organize-'));
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  const o = spawnSync(python, ['-B', path.join(base, 'hooks', ORGANIZE), '--config', path.join(base, 'config', 'session-organize-once.example.json'), '--state-dir', path.join(tmp, 'state')], {
+    input: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'selftest', source: 'startup' }),
+    encoding: 'utf8',
+    env,
+    timeout: 10000,
+  });
+  fs.rmSync(tmp, { recursive: true, force: true });
+  if (o.status !== 0 || String(o.stdout).trim() !== '{}') problems.push(`首轮整理钩子跑不起来（${python}，退出码 ${o.status}，${o.stderr || o.stdout}）`);
   return problems;
 }
 
@@ -130,8 +184,8 @@ export function copyRuntime(dest, kit = KIT) {
   const hooks = path.join(kit, 'hooks');
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(dest, { recursive: true });
-  // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过
-  fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.')) });
+  // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
+  fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.') || p === '__pycache__') });
   fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
 }
 
@@ -164,7 +218,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符。');
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通。');
     plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
@@ -190,14 +244,16 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
     after = mergeHooks(after, ourPostGroups('claude', stableNode(), runtime), { remove, event: 'PostToolUse' });
     after = mergeHooks(after, ourPromptGroups('claude', stableNode(), runtime), { remove, event: 'UserPromptSubmit' });
+    after = mergeHooks(after, ourStartGroups('claude', stablePython(), runtime), { remove, event: 'SessionStart' });
     plan.push(`Claude Code：${file}`);
+    if (!remove) plan.push(`  ${ensureOrganizeConfig(sd, home)}`);
     if (remove) {
-      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 6 组 hook；你原有的同名规则不动` : '  找不到安装记录，权限规则不动（只去掉 6 组 hook）');
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 8 组 hook；你原有的同名规则不动；首轮整理配置留在状态目录` : '  找不到安装记录，权限规则不动（只去掉 8 组 hook）');
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
       const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage，hooks.UserPromptSubmit 放入 thinking-review-nudge（旧的 agent-kit hook 先去掉）`);
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage，hooks.UserPromptSubmit 放入 thinking-review-nudge 和首轮整理，hooks.SessionStart 放入首轮整理（旧的 agent-kit hook 和 ~/.claude/hooks 下的旧首轮整理先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
@@ -250,6 +306,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     if (nextManifest.claude) fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
     else fs.rmSync(manifestFile, { force: true });
   } else {
+    if (doClaude) ensureOrganizeConfig(sd, home, { write: true });
     copyRuntime(runtime);
     nextManifest.kit = KIT;
     nextManifest.installedAt = new Date().toISOString();
