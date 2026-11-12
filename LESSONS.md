@@ -333,3 +333,16 @@
 - 出现过的项目：postpane、carvomoto；语料里 work-desk、github-center、my-skills、personal-ai-workbench 的会话也被拦过。
 - 升级：〔机检〕机器拦截，`hooks/bash-precheck.mjs`（#49）在执行前当场拒绝这几类写法并给出改写；`tools/doctor.mjs` 查装没装、实跑一次。
 - 触发：`stopped responding`、`timed out after`、`outstanding_host_request`
+
+## G-26 改了 Hermes 的 SOUL 或工作规程、重启网关后，已在进行的会话仍用旧人设（2026-11-12 提升）
+
+- 现象：给 Hermes 的 profile 装了新的 `SOUL.md`、`workspace/HERMES.md`，`launchctl kickstart -k` 重启网关、日志里飞书已连上，在飞书私聊发一句话实测，回答还是旧人设的样子，容易误判成「装上了、生效了」或「新人设没用」。
+- 根因：Hermes 为了命中模型的提示缓存，对还在继续的会话直接沿用这个会话第一次存下的系统提示（`agent/conversation_loop.py` 的 `_restore_or_build_system_prompt`；存在 `state.db` 的 `system_prompts` 表，`sessions.system_prompt_hash` 指过去），不重新读 SOUL 和规程。飞书私聊长期落在同一个会话里（这次那个会话从 11-02 开到 11-12），所以重启网关也不换。只有新会话（`/new`、`/reset`，或按重置策略过期）才按新文件重建。
+- 正确做法：
+  - 改完 SOUL 或规程、重启网关后，验收前先在对应渠道发 `/new` 开新会话，再用真实的工作问题测，不用「你好」这类测不出差别的话。
+  - 判断某个会话用的是哪版人设，查它存下的系统提示里有没有新版独有的标题：`sqlite3 <profile>/state.db "select instr(sp.prompt,'<新版独有的标题>')>0 from sessions s join system_prompts sp on sp.hash=s.system_prompt_hash where s.id='<会话号>';"`。会话号看 `logs/agent.log` 里 `conversation turn: session=`。
+  - 交接或通知里写清「新人设只对新会话生效」，提醒常浩发 `/new`。
+- 来源：digital-twin 2026-11-12（`CURRENT.md`「记忆日报重试修复和亚古兽人设 V4 已合并并安装」一节，`0e0421c`）：亚古兽老会话 `20261102_180956_56cddf01` 存的系统提示仍是旧版「性格与表达」；发 `/new` 后新会话 `20261112_112402_fd35aaa1` 含新版「思维内核」，回答随之变短。
+- 出现过的项目：digital-twin。
+- 升级：〔提醒〕未升级。要更硬可以在人设安装步骤里加一步，自动给常浩私聊发「已更新人设，发 /new 生效」；现在人设安装是手工拷文件，没有安装脚本可挂，先不做。
+- 触发：`/\.hermes\/(profiles\/[^\/]+\/)?SOUL\.md/`、`/workspace\/HERMES\.md/`
