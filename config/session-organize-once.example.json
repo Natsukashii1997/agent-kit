@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "host": {
+    "entrypoint": "claude-desktop"
+  },
+  "naming": {
+    "enabled": true
+  },
+  "grouping": {
+    "enabled": true,
+    "unmatched": "leave_unclassified",
+    "routes": [
+      {
+        "id": "example-project",
+        "enabled": true,
+        "section_id": "cg-00000000-0000-0000-0000-000000000000",
+        "section_name": "示例分区",
+        "title_prefix": "示例项目",
+        "project_roots": [
+          "/Users/you/work/example-project"
+        ],
+        "aliases": [
+          "示例项目",
+          "example-project"
+        ]
+      }
+    ]
+  },
+  "folder_check": {
+    "enabled": true,
+    "watch_roots": {
+      "scratch": "~/Library/Application Support/Claude/scratch-workspaces",
+      "downloads": "~/Downloads"
+    },
+    "projects_file": "~/work/digital-twin/projects.json"
+  }
+}

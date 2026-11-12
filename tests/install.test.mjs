@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -84,8 +84,21 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.equal(after.hooks.PreToolUse[2].matcher, 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode');
   assert.equal(after.hooks.PreToolUse[3].matcher, 'Bash');
   assert.ok(after.hooks.PreToolUse[3].hooks[0].command.endsWith('bash-precheck.mjs"'));
-  assert.equal(after.hooks.UserPromptSubmit.length, 1);
+  assert.equal(after.hooks.UserPromptSubmit.length, 2, 'thinking-review-nudge 和首轮整理');
   assert.ok(after.hooks.UserPromptSubmit[0].hooks[0].command.endsWith('thinking-review-nudge.mjs"'));
+  // 首轮整理（#65）：两处都指向 runtime 副本，配置和运行记录在状态目录
+  const organizeDir = path.join(state, 'session-organize-once');
+  const organizeCmd = `"${path.join(state, 'runtime', 'hooks', 'session-organize-once', 'session_organize_once.py')}" --config "${path.join(organizeDir, 'config.json')}" --state-dir "${path.join(organizeDir, 'state')}"`;
+  const [promptOrganize] = after.hooks.UserPromptSubmit[1].hooks;
+  assert.ok(promptOrganize.command.endsWith(organizeCmd), promptOrganize.command);
+  assert.equal(after.hooks.SessionStart.length, 1);
+  assert.equal(after.hooks.SessionStart[0].matcher, 'startup|fork');
+  assert.deepEqual(after.hooks.SessionStart[0].hooks, [promptOrganize]);
+  assert.equal(promptOrganize.timeout, 5);
+  assert.equal(promptOrganize.statusMessage, '整理新会话');
+  assert.ok(fs.existsSync(path.join(state, 'runtime', 'hooks', 'session-organize-once', 'session_organize_once.py')));
+  assert.ok(!fs.existsSync(path.join(state, 'runtime', 'hooks', 'session-organize-once', '__pycache__')));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(organizeDir, 'config.json'), 'utf8')), JSON.parse(fs.readFileSync(new URL('../config/session-organize-once.example.json', import.meta.url), 'utf8')), '没有旧配置时拷示例');
   const cmds = after.hooks.PreToolUse.flatMap(g => g.hooks);
   assert.ok(cmds.every(h => h.command.includes(path.join(state, 'runtime', 'hooks')) && h.timeout === 10));
   assert.ok(fs.existsSync(path.join(state, 'runtime', 'LESSONS.md')));
@@ -105,16 +118,97 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.match(nudge.stdout, /thinking-review/);
   const precheck = spawnSync('/bin/sh', ['-c', cmds.at(-1).command], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }), encoding: 'utf8', env: { ...process.env, ...env, AGENT_KIT_NO_LOG: '1' } });
   assert.match(precheck.stdout, /"deny"/);
+  // 首轮整理照设置里的命令原样跑：新会话先登记，首条消息再注入整理规则
+  const desktop = { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_HOST_SESSION_ID: 'local_test-1', CLAUDE_CODE_SESSION_ATTENDED: '1' };
+  const runOrganize = event => spawnSync('/bin/sh', ['-c', promptOrganize.command], { input: JSON.stringify(event), encoding: 'utf8', env: desktop });
+  assert.equal(runOrganize({ hook_event_name: 'SessionStart', source: 'startup', session_id: 'org-1' }).status, 0);
+  const organized = runOrganize({ hook_event_name: 'UserPromptSubmit', session_id: 'org-1', prompt_id: 'p-1', cwd: home, prompt: '做点事' });
+  assert.match(organized.stdout, /additionalContext/);
+  assert.match(fs.readFileSync(path.join(organizeDir, 'state', 'decisions.log'), 'utf8'), /armed[\s\S]*dispatched/);
 
   assert.equal(quiet(() => main(args(['--apply']), home, env)), 0, '重复安装');
   assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), after, '重复安装不改设置');
 
   assert.equal(quiet(() => main(['--uninstall', '--apply'], home, env)), 0);
-  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), original, '卸载后原有的同名规则还在');
+  assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), original, '卸载后原有的同名规则还在，SessionStart 和 UserPromptSubmit 也一并去掉');
+  assert.ok(fs.existsSync(path.join(organizeDir, 'config.json')), '卸载不删首轮整理配置');
   assert.ok(!fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
   assert.deepEqual(fs.readdirSync(path.join(home, '.codex', 'rules')), [], '规则目录里不留备份');
   assert.ok(!fs.existsSync(path.join(state, 'runtime')));
   assert.ok(!fs.existsSync(path.join(state, 'install-manifest.json')));
+});
+
+test('首轮整理：旧路径（~/.claude/hooks 下）的条目重装时换成 runtime 副本，同组里别人的 hook 保留', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const settings = path.join(home, '.claude', 'settings.json');
+  const legacy = path.join(home, '.claude', 'hooks', 'session-organize-once');
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'config.json'), JSON.stringify({ schema: 1, mine: true }));
+  const legacyCmd = `/usr/bin/python3 "${path.join(legacy, 'session_organize_once.py')}" --config "${path.join(legacy, 'config.json')}" --state-dir "${path.join(legacy, 'state')}"`;
+  const handoff = { type: 'command', command: 'node ~/.claude/hooks/context_handoff.mjs' };
+  const theirStart = { matcher: 'startup', hooks: [{ type: 'command', command: 'echo hi' }] };
+  fs.writeFileSync(settings, JSON.stringify({ hooks: {
+    SessionStart: [theirStart, { matcher: 'startup|fork', hooks: [{ type: 'command', command: legacyCmd, timeout: 5 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: legacyCmd, timeout: 5 }, handoff] }],
+  } }));
+  const run = extra => quiet(() => main([...extra, '--only', 'claude', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: state }));
+
+  assert.equal(run(['--apply']), 0);
+  const after = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  const all = ev => after.hooks[ev].flatMap(g => g.hooks.map(h => h.command));
+  for (const ev of ['SessionStart', 'UserPromptSubmit']) {
+    assert.ok(!all(ev).some(c => c.includes(legacy)), `${ev} 里旧路径已去掉`);
+    assert.equal(all(ev).filter(c => c.includes(path.join(state, 'runtime', 'hooks', 'session-organize-once'))).length, 1, `${ev} 里只有一条新的`);
+  }
+  assert.deepEqual(after.hooks.SessionStart[0], theirStart, '别人的 SessionStart 保留');
+  assert.deepEqual(after.hooks.UserPromptSubmit[0].hooks, [handoff], '同组里的 context_handoff 保留');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, 'session-organize-once', 'config.json'), 'utf8')), { schema: 1, mine: true }, '真实配置从旧位置迁过来');
+  assert.ok(fs.existsSync(path.join(legacy, 'config.json')), '旧配置不删');
+
+  assert.equal(run(['--uninstall', '--apply']), 0);
+  const removed = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  assert.deepEqual(removed.hooks.SessionStart, [theirStart], '卸载后 SessionStart 只剩别人的');
+  assert.deepEqual(removed.hooks.UserPromptSubmit, [{ hooks: [handoff] }]);
+});
+
+test('首轮整理配置：已有不动、从旧位置迁移、拷示例；预览不写', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const sd = path.join(home, 'state');
+  const dest = path.join(sd, 'session-organize-once', 'config.json');
+  const example = fs.readFileSync(new URL('../config/session-organize-once.example.json', import.meta.url), 'utf8');
+
+  assert.match(ensureOrganizeConfig(sd, home), /拷示例/);
+  assert.ok(!fs.existsSync(dest), '预览不写');
+  ensureOrganizeConfig(sd, home, { write: true });
+  assert.equal(fs.readFileSync(dest, 'utf8'), example);
+
+  fs.writeFileSync(dest, '{"schema":1,"edited":true}');
+  const legacy = path.join(home, '.claude', 'hooks', 'session-organize-once');
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'config.json'), '{"schema":1,"legacy":true}');
+  assert.match(ensureOrganizeConfig(sd, home, { write: true }), /不动/);
+  assert.equal(fs.readFileSync(dest, 'utf8'), '{"schema":1,"edited":true}', '已有的不被旧配置或示例覆盖');
+
+  fs.rmSync(dest);
+  assert.match(ensureOrganizeConfig(sd, home, { write: true }), /迁移/);
+  assert.equal(fs.readFileSync(dest, 'utf8'), '{"schema":1,"legacy":true}');
+});
+
+test('首轮整理只装 Claude；命令带 --config 和 --state-dir', () => {
+  assert.deepEqual(ourStartGroups('codex', '/py', '/s/runtime'), []);
+  assert.deepEqual(ourPromptGroups('codex', '/n', '/s/runtime', '/py'), []);
+  const [start] = ourStartGroups('claude', '/py', '/s/runtime');
+  assert.equal(start.hooks[0].command, '"/py" "/s/runtime/hooks/session-organize-once/session_organize_once.py" --config "/s/session-organize-once/config.json" --state-dir "/s/session-organize-once/state"');
+  assert.ok(isOurHook(start.hooks[0]));
+  assert.deepEqual(ourPromptGroups('claude', '/n', '/s/runtime', '/py')[1].hooks, start.hooks);
+});
+
+test('Python 换成不随版本变的入口', async () => {
+  const { stablePython } = await import('../tools/install.mjs');
+  assert.equal(stablePython(p => p.includes('Versions/Current') || p === '/opt/homebrew/bin/python3'), '/Library/Frameworks/Python.framework/Versions/Current/bin/python3');
+  assert.equal(stablePython(p => p === '/usr/bin/python3'), '/usr/bin/python3');
+  assert.equal(stablePython(() => false), 'python3');
 });
 
 test('重装：以前装时加的、配置里已去掉的先问规则一并去掉，你自己的不动', () => {
@@ -145,15 +239,18 @@ test('Homebrew 的 node 换成不随版本变的入口', async () => {
   assert.equal(stableNode('/opt/homebrew/Cellar/node/22.9.0/bin/node', () => false), '/opt/homebrew/Cellar/node/22.9.0/bin/node');
 });
 
-test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/worktrees）也整份复制，只跳过 hooks 里的隐藏文件', () => {
+test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/worktrees）也整份复制，只跳过 hooks 里的隐藏文件和 __pycache__', () => {
   const kit = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-')), '.claude', 'worktrees', 'x');
   fs.mkdirSync(path.join(kit, 'hooks', 'lib'), { recursive: true });
   fs.writeFileSync(path.join(kit, 'hooks', 'guard-git.mjs'), '');
   fs.writeFileSync(path.join(kit, 'hooks', 'lib', 'common.mjs'), '');
   fs.writeFileSync(path.join(kit, 'hooks', '.DS_Store'), '');
+  fs.mkdirSync(path.join(kit, 'hooks', 'session-organize-once', '__pycache__'), { recursive: true });
+  fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', 'session_organize_once.py'), '');
+  fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', '__pycache__', 'x.pyc'), '');
   fs.writeFileSync(path.join(kit, 'LESSONS.md'), '');
   const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-')), 'runtime');
   copyRuntime(dest, kit);
-  assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs']);
+  assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs', 'session-organize-once', 'session-organize-once/session_organize_once.py']);
   assert.ok(fs.existsSync(path.join(dest, 'LESSONS.md')));
 });

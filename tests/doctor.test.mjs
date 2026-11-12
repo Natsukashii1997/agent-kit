@@ -100,6 +100,21 @@ test('命令行跑一次：存报告，第一行开始时间，最后一行 exit
   assert.match(lines.at(-1), /^exit [01]$/);
 });
 
+test('首轮整理（#65）：还指向 ~/.claude/hooks 旧位置、或状态目录没有配置，都要报', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const file = path.join(home, '.claude', 'settings.json');
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const legacy = path.join(home, '.claude', 'hooks');
+  for (const g of s.hooks.SessionStart) for (const h of g.hooks) h.command = h.command.replace(path.join(dir, 'runtime', 'hooks'), legacy);
+  fs.writeFileSync(file, JSON.stringify(s));
+  fs.rmSync(path.join(dir, 'session-organize-once', 'config.json'));
+  const r = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'Claude 权限规则');
+  assert.equal(r.status, 'warn');
+  assert.ok(r.detail.some(d => d.includes('首轮整理钩子没装，或还指向')));
+  assert.ok(r.detail.some(d => d.includes('session-organize-once/config.json')));
+});
+
 test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失败', () => {
   const home = fakeHome();
   const file = path.join(home, '.claude', 'settings.json');
