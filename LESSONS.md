@@ -357,5 +357,5 @@
   - 验证常驻服务能不能用，要在和服务相同的环境里测：`env -i HOME=$HOME USER=$USER PATH=… HTTPS_PROXY=… <命令>`，代理按服务 plist 或 `.env` 里的写；不要在带桌面应用变量的 shell 里直接测。
 - 来源：digital-twin 2026-11-14（`CURRENT.md`「个人项目日报连续三期降级查因」一节，`8ec5a5d`）：带代理重登后 `Login successful.`；干净环境下 `hermes chat -Q` 的会话 `20261114_094741_dec7f3` 用回 `claude-opus-5-5[1m]`。
 - 出现过的项目：digital-twin（Hermes 网关的 Claude 登录）。
-- 升级：〔提醒〕未升级（2026-11-14）。要「出了也马上有人发现」可升〔体检〕：digital-twin 的工程自检（并进每天 10:00 日报）用和网关相同的环境查 `claude auth status`，没登上就在卡片里给出带代理的登录命令；方案待常浩点头。
+- 升级：〔体检〕部分升级（2026-11-14，digital-twin #180 / PR #181 `7b425af`）：digital-twin 工程自检每天 10:00 随个人项目日报跑 `ai_access.py status`，Hermes 主模型走本机 Claude 而 Claude 不可用时，在日报卡片报后果和带代理的登录命令。范围：只管 Hermes 用的本机 Claude 登录；不覆盖 codex、gh 等其他命令行工具的登录，也拦不住在没代理的终端里登录这个动作本身（那一步靠「触发」提醒和本条的正确做法）。
 - 触发：`auth login`、`setup-token`、`codex login`
