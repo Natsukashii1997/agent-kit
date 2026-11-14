@@ -346,3 +346,16 @@
 - 出现过的项目：digital-twin。
 - 升级：〔提醒〕未升级。要更硬可以在人设安装步骤里加一步，自动给常浩私聊发「已更新人设，发 /new 生效」；现在人设安装是手工拷文件，没有安装脚本可挂，先不做。
 - 触发：`/\.hermes\/(profiles\/[^\/]+\/)?SOUL\.md/`、`/workspace\/HERMES\.md/`
+
+## G-27 在没走代理的终端里登录命令行 AI 工具：浏览器显示授权成功，命令行却没登上（2026-11-14 新增）
+
+- 现象：本机 `claude` 的登录过期，常驻服务（Hermes 网关）调它报 `OAuth session expired and could not be refreshed`，悄悄回退到备用模型，连续三天的日报都降级了。常浩在终端跑 `claude auth login`，浏览器显示「You're all set up for Claude Code」，以为登好了；`claude auth status` 仍是 `loggedIn: false`，钥匙串凭据也没更新。在 Claude 桌面应用的终端面板里再跑一次，浏览器授权后终端才看到 `Login failed: Request failed with status code 403`。
+- 根因：浏览器授权走的是系统代理，能成功；最后一步「用授权码换凭据」由命令行自己发请求，它只认进程环境里的 `HTTPS_PROXY`，而交互终端（包括桌面应用的终端面板）默认没有代理变量，直连被拒（403）。浏览器页面只说明授权这一半成功了，不说明凭据已经写进本机。和 G-19 是同一类问题，方向相反：G-19 是常驻服务缺代理，这条是交互终端缺代理。另外，在 Claude 桌面应用的 Bash 里验证时，会继承桌面应用的 `ANTHROPIC_BASE_URL` 等变量，Hermes 的 Claude 插件见到它就拒绝走登录态（`OAuth provider refuses conflicting native auth/backend overrides`）并回退，看着像还没修好，其实是测试环境不对。
+- 正确做法：
+  - 登录命令行 AI 工具（`claude auth login`、`codex login`、`gh auth login` 这一类）时带上代理：`HTTPS_PROXY=http://127.0.0.1:8086 HTTP_PROXY=http://127.0.0.1:8086 NO_PROXY=localhost,127.0.0.1,::1 claude auth login`。
+  - 以终端里出现 `Login successful.` 加 `claude auth status` 为 `loggedIn: true` 算登上，不以浏览器页面为准。终端报 403 或超时，先查 `env | grep -i proxy`，不要原样重试。
+  - 验证常驻服务能不能用，要在和服务相同的环境里测：`env -i HOME=$HOME USER=$USER PATH=… HTTPS_PROXY=… <命令>`，代理按服务 plist 或 `.env` 里的写；不要在带桌面应用变量的 shell 里直接测。
+- 来源：digital-twin 2026-11-14（`CURRENT.md`「个人项目日报连续三期降级查因」一节，`8ec5a5d`）：带代理重登后 `Login successful.`；干净环境下 `hermes chat -Q` 的会话 `20261114_094741_dec7f3` 用回 `claude-opus-5-5[1m]`。
+- 出现过的项目：digital-twin（Hermes 网关的 Claude 登录）。
+- 升级：〔提醒〕未升级（2026-11-14）。要「出了也马上有人发现」可升〔体检〕：digital-twin 的工程自检（并进每天 10:00 日报）用和网关相同的环境查 `claude auth status`，没登上就在卡片里给出带代理的登录命令；方案待常浩点头。
+- 触发：`auth login`、`setup-token`、`codex login`
