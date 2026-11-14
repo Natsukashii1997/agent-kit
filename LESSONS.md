@@ -359,3 +359,16 @@
 - 出现过的项目：digital-twin（Hermes 网关的 Claude 登录）。
 - 升级：〔体检〕部分升级（2026-11-14，digital-twin #180 / PR #181 `7b425af`）：digital-twin 工程自检每天 10:00 随个人项目日报跑 `ai_access.py status`，Hermes 主模型走本机 Claude 而 Claude 不可用时，在日报卡片报后果和带代理的登录命令。范围：只管 Hermes 用的本机 Claude 登录；不覆盖 codex、gh 等其他命令行工具的登录，也拦不住在没代理的终端里登录这个动作本身（那一步靠「触发」提醒和本条的正确做法）。
 - 触发：`auth login`、`setup-token`、`codex login`
+
+## G-28 Artifact 网页里脚本声明了全局变量 `claude`，发布后整页空白，本机打开却正常（2026-11-14 新增）
+
+- 现象：用 Artifact 工具发布的预览页，本机浏览器打开一切正常；发布后在 claude.ai 打开，只剩静态的标题和空框，脚本画的内容全没有。
+- 根因：页面脚本顶层写了 `const claude = …`。Artifact 宿主会在页面里预先放一个不可删的 `window.claude`（运行时接口），经典脚本顶层的 `const` / `let` 和它重名，浏览器直接报 `SyntaxError: Identifier 'claude' has already been declared`，整段脚本一行都不执行。本机预览没有宿主，所以测不出来。
+- 正确做法：
+  - Artifact 页面脚本不用 `claude` 当变量名或函数名（宿主占用），整段代码包进 `(() => { … })();` 自己的作用域，不往全局放东西。
+  - 本机自查时模拟宿主：在页面最前面加 `<script>Object.defineProperty(window,"claude",{value:{},configurable:false})</script>` 再打开，看控制台有没有报错、内容有没有画出来。
+  - 发布后打不开时，先看是不是脚本整段没执行（标签、卡片全空），再查重名。
+- 来源：postpane 2026-11-14 #341 三版预览页（https://claude.ai/artifact/3Ya3jFccSdcF7GPFkgfqiz 第 1、2 版空白，第 3 版改名包作用域后正常）；本机模拟宿主复现到 `Identifier 'claude' has already been declared`。postpane `CURRENT.md`「#341」一节「与授权不一致之处」有记录。
+- 出现过的项目：postpane（设计预览页）。
+- 升级：〔提醒〕未升级（2026-11-14）：只有写出 `const claude` 这类声明时的关键词提醒。〔机检〕要在 Artifact 发布前检查页面脚本，发布走的是宿主工具，agent-kit 拦不到那一步；〔结构〕做不到，页面每次都是新写的。
+- 触发：`/\b(const|let|var|function|class)\s+claude\b/`
