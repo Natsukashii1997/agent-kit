@@ -42,6 +42,8 @@ test('典型命令命中对应的坑', () => {
   assert.ok(ids('const t = row.createdAt.slice(0, 16)').includes('G-02'));
   assert.ok(ids("s.replace('T', ' ')").includes('G-02'));
   assert.ok(ids('#!/bin/bash\nset -euo pipefail').includes('G-08'));
+  assert.ok(ids('hermes config set skills.disabled obsidian').includes('G-29'));
+  assert.ok(ids('# 故意改坏：去掉装配置的锁').includes('G-29'));
 });
 
 test('普通命令不误报', () => {

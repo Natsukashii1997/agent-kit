@@ -6,8 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { decide, hookOutput } from '../hooks/guard-git.mjs';
+import { pushLeakFixture } from '../tools/doctor.mjs';
 
-const onBranch = b => ({ currentBranch: () => b });
+// 只测命令解析的用例不碰真仓库：推送前检查（#76）换成「没带出提交」的桩，结果不随本机仓库状态变
+const onBranch = b => ({ currentBranch: () => b, leakedCommits: () => null });
 const denied = (cmd, opts = onBranch('feature')) => decide(cmd, opts)?.decision === 'deny';
 
 test('强推或删除 main/master：拦下', () => {
@@ -88,3 +90,143 @@ test('经符号链接的路径启动也照样拦（macOS 的 /var 就是指向 /
   const r = spawnSync(process.execPath, [path.join(link, 'guard-git.mjs')], { input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'git push -f origin main' } }), encoding: 'utf8' });
   assert.match(r.stdout, /"permissionDecision":"deny"/, '入口判断认不出自己时，hook 什么都不做、直接放行');
 });
+
+// ---------- 推送前检查（#76）：本地 main 有没推的提交，要推的分支带着它们 ----------
+
+const run = (cmd, args, opts) => {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', input: opts?.input, env: { ...process.env, ...(opts?.env || {}) } });
+  return { code: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+};
+const withFixture = fn => {
+  const fx = pushLeakFixture(run);
+  try {
+    fn(fx);
+  } finally {
+    fs.rmSync(fx.root, { recursive: true, force: true });
+  }
+};
+
+test('重现 2026-10-27：本地 main 领先 origin/main 3 个提交，从它拉分支再推，拦下并写清原因和做法', () => {
+  withFixture(({ root, work }) => {
+    const r = decide('git push -u origin claude/probe', { cwd: work });
+    assert.equal(r?.decision, 'deny');
+    assert.match(r.reason, /要推的 claude\/probe 带着本地 main 上 3 个还没推到 origin\/main 的提交/);
+    for (const i of [1, 2, 3]) assert.match(r.reason, new RegExp(`别的会话没推的提交 ${i}`));
+    assert.ok(!r.reason.includes('分支自己的提交'), '只列本地 main 上没推的，不列分支自己的');
+    assert.match(r.reason, /git switch -c <新分支> origin\/main/);
+    assert.match(r.reason, /先推 main（《工程流程》第 5 节第 1 步）/);
+    // 各种写法都认：git -C、参数乱序、cd 进去再推、不写分支名、写 HEAD、换个远端分支名、bash -c、gh pr create。
+    // 认不出：bash -c "cd 别处 && git push"（公共分词先按 && 切开，引号不起作用，见 docs/机器执行层.md「已知漏洞」）
+    for (const [cmd, cwd] of [
+      [`git -C ${work} push origin claude/probe`, root],
+      [`git -C work push origin claude/probe`, root],
+      ['git push origin claude/probe -u', work],
+      ['git push --set-upstream origin claude/probe', work],
+      [`cd ${work} && git push -u origin claude/probe`, root],
+      [`cd work && git push`, root],
+      ['git push', work],
+      ['git push origin HEAD', work],
+      ['git push origin HEAD:refs/heads/claude/other', work],
+      ['git push origin main:claude/other', work],
+      ['git push --force-with-lease origin claude/probe', work],
+      [`bash -c "git -C ${work} push -u origin claude/probe"`, root],
+      ['gh pr create --fill', work],
+      ['gh pr create --base main --head claude/probe --title x', work],
+      ['gh pr create -H someone:claude/probe', work],
+    ])
+      assert.equal(decide(cmd, { cwd })?.decision, 'deny', cmd);
+    const prReason = decide('gh pr create --fill', { cwd: work }).reason;
+    assert.match(prReason, /要开 PR 的 claude\/probe/);
+  });
+});
+
+test('推送前检查：作为 hook 真跑也拦（输出 deny JSON、退出码 0）', () => {
+  withFixture(({ work }) => {
+    const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'guard-git.mjs');
+    const r = spawnSync(process.execPath, [file], { input: JSON.stringify({ tool_name: 'Bash', cwd: work, tool_input: { command: 'git push -u origin claude/probe' } }), encoding: 'utf8' });
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout).hookSpecificOutput;
+    assert.equal(out.permissionDecision, 'deny');
+    assert.match(out.permissionDecisionReason, /origin\/main/);
+  });
+});
+
+test('推送前检查不该拦的：从 origin/main 拉的分支、推 main 本身、main 推上去以后、强推规则照旧优先', () => {
+  withFixture(({ work, git }) => {
+    // 正确做法：从 origin/main 重新拉分支
+    git('-C', work, 'switch', '-q', '-c', 'claude/clean', 'origin/main');
+    git('-C', work, 'commit', '-q', '--allow-empty', '-m', '只有自己的提交');
+    for (const cmd of ['git push -u origin claude/clean', 'git push', 'git push origin HEAD', 'gh pr create --fill'])
+      assert.equal(decide(cmd, { cwd: work }), null, cmd);
+    // 推 main 本身归《工程流程》5.1 管，不归这一条；--all / --tags / 删除远端分支也不归
+    for (const cmd of ['git push origin main', 'git push origin HEAD:main', 'git push --all origin', 'git push --tags', 'git push origin --delete claude/probe', 'git push origin :claude/probe'])
+      assert.equal(decide(cmd, { cwd: work }), null, cmd);
+    // 在 main 上 gh pr create：不管（gh 自己会拒）
+    git('-C', work, 'switch', '-q', 'main');
+    assert.equal(decide('gh pr create --fill', { cwd: work }), null);
+    // 强推 main 仍按原规则拦，理由是强推
+    assert.match(decide('git push -f origin main', { cwd: work }).reason, /强推到 main/);
+    // 常浩同意后先推了 main：分支不再带着没推的提交，放行
+    git('-C', work, 'push', '-q', 'origin', 'main');
+    assert.equal(decide('git push -u origin claude/probe', { cwd: work }), null);
+    assert.equal(decide('gh pr create --head claude/probe', { cwd: work }), null);
+  });
+});
+
+test('推送前检查不该拦的：分离头指针、没有 origin/main、没有远端、不在仓库里、分支不存在', () => {
+  withFixture(({ root, work, git }) => {
+    git('-C', work, 'switch', '-q', '--detach', 'claude/probe');
+    for (const cmd of ['git push', 'git push origin HEAD:refs/heads/claude/x', 'gh pr create --fill'])
+      assert.equal(decide(cmd, { cwd: work }), null, `分离头指针：${cmd}`);
+    git('-C', work, 'switch', '-q', 'claude/probe');
+    assert.equal(decide('git push origin claude/nope', { cwd: work }), null, '分支不存在：git 出错就不拦');
+    // 有远端、但从没取到 origin/main（引用删掉）
+    git('-C', work, 'update-ref', '-d', 'refs/remotes/origin/main');
+    assert.equal(decide('git push -u origin claude/probe', { cwd: work }), null, '没有 origin/main');
+    // 没有远端
+    git('-C', work, 'remote', 'remove', 'origin');
+    assert.equal(decide('git push -u origin claude/probe', { cwd: work }), null, '没有远端');
+    // 不在仓库里
+    const plain = fs.mkdtempSync(path.join(root, 'plain-'));
+    assert.equal(decide('git push -u origin claude/probe', { cwd: plain }), null, '不在仓库里');
+    assert.equal(decide('gh pr create --fill', { cwd: plain }), null, '不在仓库里');
+  });
+});
+
+test('推送前检查：用桩确认解析出的来源分支和所在目录', () => {
+  const calls = [];
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-cd-'));
+  const opts = { cwd: '/w/repo', currentBranch: () => 'claude/x', leakedCommits: (dir, src) => (calls.push([dir, src]), null) };
+  for (const cmd of ['git push -u origin claude/x', 'git -C ../other push origin feat:claude/y', `cd ${real} && git push`, 'cd /no/such/dir && git push', 'gh pr create -H me:claude/z', 'git push origin +claude/x'])
+    assert.equal(decide(cmd, opts), null, cmd);
+  assert.deepEqual(calls, [
+    ['/w/repo', 'claude/x'],
+    ['/w/other', 'feat'],
+    [real, 'claude/x'],
+    ['/w/repo', 'claude/x'], // cd 到不存在的目录：照旧用会话目录
+    ['/w/repo', 'claude/z'],
+    ['/w/repo', 'claude/x'],
+  ]);
+  // 带出了提交就拦，理由里列提交，超过 5 个只列前 5 个
+  const leak = { base: 'main', unpushed: 7, commits: Array.from({ length: 7 }, (_, i) => ({ short: `c${i}`, subject: `提交 ${i}` })) };
+  const r = decide('git push -u origin claude/x', { ...opts, leakedCommits: () => leak });
+  assert.equal(r.decision, 'deny');
+  assert.match(r.reason, /c4 提交 4/);
+  assert.ok(!r.reason.includes('c5 提交 5'));
+  assert.match(r.reason, /另有 2 个/);
+});
+
+test('cd 解析不出真实目录时照旧用会话目录，强推 main 的守卫不被放松（审查意见，#77）', () => {
+  // 会话目录在 main 上：cd 的目标是变量、命令替换、不存在的目录，都按会话目录判断，照样拦
+  const byDir = dir => (dir === '/w/main-repo' ? 'main' : null);
+  const opts = { cwd: '/w/main-repo', currentBranch: byDir, leakedCommits: () => null };
+  for (const cmd of ['cd "$DIR" && git push -f', 'cd $DIR && git push -f', 'cd $(git rev-parse --show-toplevel) && git push -f', 'cd `pwd` && git push -f', 'cd /no/such/dir && git push -f', 'cd - && git push -f'])
+    assert.equal(decide(cmd, opts)?.decision, 'deny', cmd);
+  // cd 到真实存在、在功能分支上的子仓库再强推：按子仓库判断，放行；强推 main 照样拦
+  withFixture(({ work }) => {
+    const main = { cwd: '/w/main-repo', currentBranch: dir => (dir === '/w/main-repo' ? 'main' : byDirReal(dir)), leakedCommits: () => null }; // 这里只测强推规则
+    assert.equal(decide(`cd ${work} && git push -f`, main), null);
+    assert.equal(decide(`cd ${work} && git push -f origin main`, main)?.decision, 'deny');
+  });
+});
+const byDirReal = dir => spawnSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout.trim() || null;

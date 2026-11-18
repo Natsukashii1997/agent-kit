@@ -64,6 +64,34 @@ export function extractSection(text, heading) {
     .trim();
 }
 
+// 2026-10-27 那次的形态（#76）：远端 main 有 1 个提交，本地 main 领先 3 个没推，从本地 main 拉分支再加一个自己的提交。
+// 全在临时目录里，git 不读本机的全局和系统配置；用完由调用方删 root。run 同 runDoctor 的 run（测试可注入）。
+export function pushLeakFixture(run = defaultRun, ahead = 3) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-push-'));
+  const remote = path.join(root, 'origin.git');
+  const work = path.join(root, 'work');
+  const env = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'agent-kit', GIT_AUTHOR_EMAIL: 'agent-kit@example.invalid', GIT_COMMITTER_NAME: 'agent-kit', GIT_COMMITTER_EMAIL: 'agent-kit@example.invalid' };
+  const git = (...args) => {
+    const r = run('git', args, { env });
+    if (r.code !== 0) throw new Error(`git ${args.join(' ')}：${r.stderr || r.stdout || `退出码 ${r.code}`}`);
+    return r.stdout;
+  };
+  try {
+    git('init', '-q', '--bare', '-b', 'main', remote);
+    git('init', '-q', '-b', 'main', work);
+    git('-C', work, 'commit', '-q', '--allow-empty', '-m', '已推的提交');
+    git('-C', work, 'remote', 'add', 'origin', remote);
+    git('-C', work, 'push', '-q', 'origin', 'main');
+    for (let i = 1; i <= ahead; i++) git('-C', work, 'commit', '-q', '--allow-empty', '-m', `别的会话没推的提交 ${i}`);
+    git('-C', work, 'switch', '-q', '-c', 'claude/probe');
+    git('-C', work, 'commit', '-q', '--allow-empty', '-m', '分支自己的提交');
+  } catch (err) {
+    fs.rmSync(root, { recursive: true, force: true });
+    throw err;
+  }
+  return { root, work, git };
+}
+
 // ---------- 各项检查：每项返回 { name, status, detail[] } ----------
 
 function checkHooks({ home, run, env, dir }) {
@@ -121,9 +149,10 @@ function checkHooks({ home, run, env, dir }) {
 
   // 装的是状态目录 runtime/ 里的副本：仓库里改了 hooks/ 或 LESSONS.md（比如加了新坑的「触发」行），要重装才生效
   const runtime = path.join(dir, 'runtime');
+  let stale = [];
   if (hasGuard || hasRemind) {
     const files = ['LESSONS.md', ...fs.readdirSync(path.join(KIT, 'hooks'), { recursive: true }).filter(f => (f.endsWith('.mjs') || f.endsWith('.py')) && !f.includes('__pycache__')).map(f => path.join('hooks', f))];
-    const stale = files.filter(f => readText(path.join(KIT, f)) !== readText(path.join(runtime, f)));
+    stale = files.filter(f => readText(path.join(KIT, f)) !== readText(path.join(runtime, f)));
     results.push(
       stale.length
         ? { name: '已装的 hook 与仓库一致', status: 'warn', detail: [`${stale.join('、')} 和仓库里的不一样`, '仓库在 main 上、拉到最新后重跑 node tools/install.mjs --apply；仓库不在 main 上时这条可以忽略'] }
@@ -140,19 +169,37 @@ function checkHooks({ home, run, env, dir }) {
     return c ? run('/bin/sh', ['-c', c], opts) : run(process.execPath, [path.join(KIT, 'hooks', file)], opts);
   };
   const g = runHook('guard-git.mjs', { tool_name: 'Bash', tool_input: { command: 'git push -f origin main' } });
+  // 推送前检查（#76）：在临时仓库里摆出 10-27 的形态，推分支应被拦下
+  let leak;
+  try {
+    const fx = pushLeakFixture(run);
+    try {
+      leak = runHook('guard-git.mjs', { tool_name: 'Bash', cwd: fx.work, tool_input: { command: 'git push -u origin claude/probe' } });
+    } finally {
+      fs.rmSync(fx.root, { recursive: true, force: true });
+    }
+  } catch (err) {
+    leak = { code: null, stdout: '', stderr: `摆不出临时仓库：${err.message}` };
+  }
   const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Bash', tool_input: { command: 'launchctl list' } }, { AGENT_KIT_NO_LOG: '1' });
   const p = runHook('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }, { AGENT_KIT_NO_LOG: '1' });
   const okG = g.code === 0 && g.stdout.includes('"deny"');
+  const okL = leak.code === 0 && leak.stdout.includes('"deny"') && leak.stdout.includes('origin/main');
   const okR = r.code === 0 && r.stdout.includes('G-05');
   const okP = p.code === 0 && p.stdout.includes('"deny"');
+  // 已装的 guard-git 是推送前检查（#76）之前的旧副本：只差这一项时给 ⚠ 提示重装，不报 ✗
+  const leakOnlyStale = okG && okR && okP && !okL && stale.includes(path.join('hooks', 'guard-git.mjs'));
   results.push(
-    okG && okR && okP
-      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下（${hasGuard && hasRemind && hasPrecheck ? '按设置里的命令实跑' : '有没装的，用仓库里的脚本试跑'}）`] }
+    leakOnlyStale
+      ? { name: 'hook 实跑自检', status: 'warn', detail: ['强推 main 被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下', '已装的 guard-git 是旧副本，还没有推送前检查（#76）：仓库在 main 上、拉到最新后重跑 node tools/install.mjs --apply'] }
+      : okG && okL && okR && okP
+      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；带着本地 main 没推的提交推分支被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下（${hasGuard && hasRemind && hasPrecheck ? '按设置里的命令实跑' : '有没装的，用仓库里的脚本试跑'}）`] }
       : {
           name: 'hook 实跑自检',
           status: 'fail',
           detail: [
             ...(!okG ? [`guard-git 没拦下强推 main：${g.stderr || g.stdout || `退出码 ${g.code}`}`] : []),
+            ...(!okL ? [`guard-git 没拦下带着本地 main 没推的提交的推送：${leak.stderr || leak.stdout || `退出码 ${leak.code}`}`] : []),
             ...(!okR ? [`lessons-remind 没提醒：${r.stderr || r.stdout || `退出码 ${r.code}`}`] : []),
             ...(!okP ? [`bash-precheck 没拦下 rm 变量加通配符：${p.stderr || p.stdout || `退出码 ${p.code}`}`] : []),
           ],

@@ -1,12 +1,16 @@
 #!/usr/bin/env node
-// 第 4 件的一部分：每周整理的输入材料。把两样只有 agent-kit 有的数据汇成一份 Markdown，存在状态目录 weekly/ 下：
+// 第 4 件的一部分：每周整理的输入材料。把几样只有 agent-kit 有的数据汇成一份 Markdown，存在状态目录 weekly/ 下：
 //   1. agent-kit 自检结果（tools/doctor.mjs）；
 //   2. 近 7 天哪几条全局坑被 hook 碰到了几次（lessons-hits.jsonl），附在哪些项目、几个会话碰到的；
-//   3. 再犯（#13）：各项目 docs/LESSONS.md 里写了「再犯：G-xx」的条目，按坑汇总，附该坑的层级（#57），
+//   3. 再犯（#13）：各项目 docs/LESSONS.md、LESSONS.md、CURRENT.md 里写了「再犯：G-xx」的条目，按坑汇总，附该坑的层级（#57），
 //      〔文字〕〔提醒〕层又再犯的单列为升级首选。这是规则写回后的效果数据，
-//      每周一份留在 weekly/，前后几期对比就是「改进前后对比」。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 AGENT_KIT_WORK_ROOT 覆盖。
+//      每周一份留在 weekly/，前后几期对比就是「改进前后对比」。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 AGENT_KIT_WORK_ROOT 覆盖；
+//      worktree 目录（.git 是文件）不算单独的项目，免得同一份 LESSONS 算两遍（#76）。
+//   4. 等批的提升（#76）：各项目 LESSONS 里「升级」行写着「可提议提升 / 提议提升 / 未升级」、还没提升为全局 G-xx 的条目，
+//      按项目列出；没有「升级」行的单独计数。给「提案 7 天收口」（《工程流程》8.2）当清单用。
 // 会话复盘本身用 my-skills 的 session-retro（my-skills#28），这里不重复做。
 // 它只汇总、不下结论，也不写任何规则；「哪条该升级、哪个是新坑」由每周整理的人来判断，照 LESSONS「只出提案」。
+// 不带调度：什么时候跑由每周整理的人定（定时另议，#76）。
 //   node tools/weekly-review.mjs            生成并打印文件路径
 //   node tools/weekly-review.mjs --stdout   直接打印内容
 import fs from 'node:fs';
@@ -57,18 +61,42 @@ export function findRecurrences(text) {
   return ids;
 }
 
-export function lessonsFiles(root) {
+// 每个项目要读的文件：LESSONS 两种放法都认（有的仓库放根目录），CURRENT.md 只用来找「再犯」（#76）。
+const PROJECT_FILES = ['docs/LESSONS.md', 'LESSONS.md', 'CURRENT.md'];
+const isLessons = name => name.endsWith('LESSONS.md');
+
+export function projectFiles(root) {
   let names = [];
   try {
-    names = fs.readdirSync(root, { withFileTypes: true }).filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('_')).map(d => d.name);
+    names = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('_'))
+      .filter(d => !isWorktree(path.join(root, d.name)))
+      .map(d => d.name);
   } catch {
     return [];
   }
-  return names
-    .map(name => ({ project: name, file: path.join(root, name, 'docs', 'LESSONS.md') }))
-    .filter(f => fs.existsSync(f.file))
-    .map(f => ({ project: f.project, text: fs.readFileSync(f.file, 'utf8') }));
+  return names.flatMap(project =>
+    PROJECT_FILES.map(name => ({ project, name, file: path.join(root, project, name) }))
+      .filter(f => fs.existsSync(f.file))
+      .map(f => ({ project: f.project, name: f.name, text: fs.readFileSync(f.file, 'utf8') })),
+  );
 }
+
+// worktree 的 .git 是一个文件（指回主仓库），主目录的是文件夹
+function isWorktree(dir) {
+  try {
+    return fs.statSync(path.join(dir, '.git')).isFile();
+  } catch {
+    return false;
+  }
+}
+
+const scanned = files => {
+  const projects = new Set(files.map(f => f.project));
+  const names = [...new Set(files.map(f => f.name))];
+  return `扫了 ${projects.size} 个项目的 ${files.length} 份文件（${names.join('、') || '无'}）。`;
+};
 
 // levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选。
 const WEAK = ['文字', '提醒'];
@@ -82,8 +110,8 @@ export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = 
     by[id].projects.add(f.project);
   }
   const rows = Object.entries(by).sort((a, b) => b[1].n - a[1].n);
-  const head = `扫了 ${files.length} 个项目的 docs/LESSONS.md。`;
-  if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
+  const head = scanned(files);
+  if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目（或 CURRENT.md 的记录）里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
   const prime = rows.filter(([id]) => WEAK.includes(levels[id])).map(([id]) => id);
   return [
     head,
@@ -95,6 +123,57 @@ export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = 
     ...(prime.length ? [`升级首选（〔文字〕〔提醒〕层又再犯）：${prime.join('、')}。按 LESSONS「怎么升级」从〔结构〕往下找第一个做得到的层。`, ''] : []),
     '看法提示：〔结构〕〔机检〕〔体检〕层的坑还在再犯，说明那一层没拦住，要改检查或换层；〔文字〕〔提醒〕层的再犯，就是文字没被遵守，往上升。',
   ];
+}
+
+// 项目 LESSONS 的条目：「## L-01 标题」这类带编号的二级标题，到下一个二级标题为止；代码块里的格式样例不算。
+// G-xx 是全局条目（agent-kit 自己的 LESSONS.md），本来就在全局，不算等批。
+const PENDING = /提议提升|未升级/; // 「可提议提升」也含「提议提升」
+const PROMOTED = /提升[：:]\s*已提升/;
+
+export function findPromotions(text) {
+  const entries = [];
+  let cur = null;
+  let fence = false;
+  for (const line of String(text || '').split('\n')) {
+    if (/^\s*```/.test(line)) fence = !fence;
+    if (fence) continue;
+    const h = line.match(/^## (.+)$/);
+    if (h) {
+      const m = h[1].match(/^([A-Z][A-Za-z]*-\d+)\s+(.*)$/);
+      cur = m && !m[1].startsWith('G-') ? { id: m[1], title: m[2].replace(/（\d{4}-\d{2}-\d{2}[^）]*）\s*$/, '').trim(), upgrades: [], promoted: false } : null;
+      if (cur) entries.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    if (/^\s*-\s*升级[：:]/.test(line)) cur.upgrades.push(line);
+    if (PROMOTED.test(line)) cur.promoted = true;
+  }
+  const open = entries.filter(e => !e.promoted);
+  return {
+    pending: open.filter(e => e.upgrades.some(l => PENDING.test(l))).map(e => ({ id: e.id, title: e.title, proposed: e.upgrades.some(l => /提议提升/.test(l)) })),
+    noLine: open.filter(e => !e.upgrades.length).map(e => ({ id: e.id, title: e.title })),
+  };
+}
+
+export function summarizePromotions(files) {
+  const lessons = files.filter(f => isLessons(f.name));
+  const by = lessons.map(f => ({ ...f, ...findPromotions(f.text) }));
+  const total = by.reduce((n, f) => n + f.pending.length, 0);
+  const noLine = by.reduce((n, f) => n + f.noLine.length, 0);
+  const lines = [
+    `${scanned(lessons)}等批 ${total} 条，另有 ${noLine} 条没有「升级」行。`,
+    '',
+    '口径：项目 LESSONS 里「升级」行写着「可提议提升」「提议提升」「未升级」、并且没有「提升：已提升为全局 G-xx」的条目；〔提议〕是升级行里明确写了提议提升的。',
+    '',
+  ];
+  for (const f of by.filter(f => f.pending.length).sort((a, b) => b.pending.length - a.pending.length)) {
+    lines.push(`### ${f.project}（${f.name}，${f.pending.length} 条）`, '');
+    lines.push(...f.pending.map(e => `- ${e.id} ${e.title}${e.proposed ? ' 〔提议〕' : ''}`), '');
+  }
+  const missing = by.filter(f => f.noLine.length);
+  if (missing.length) lines.push(`没有「升级」行：${missing.map(f => `${f.project} ${f.noLine.length} 条（${f.noLine.map(e => e.id).join('、')}）`).join('；')}。`, '');
+  lines.push('看法提示：这里只是清单，哪条换个项目也成立、该提议提升为全局 G-xx，由每周整理的人判断；已经写了〔提议〕的，按《工程流程》8.2 要在 7 天内有结论。');
+  return lines;
 }
 
 export function build({ now = Date.now(), dir = stateDir(), workRoot = process.env.AGENT_KIT_WORK_ROOT || path.join(os.homedir(), 'Documents', 'ChatGPT', '个人', 'work') } = {}) {
@@ -113,9 +192,12 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = process.e
   } catch {}
   lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
 
-  lines.push('## 3. 再犯', '', ...summarizeRecurrence(lessonsFiles(workRoot), titles, levels, statuses), '');
+  const files = projectFiles(workRoot);
+  lines.push('## 3. 再犯', '', ...summarizeRecurrence(files, titles, levels, statuses), '');
 
-  lines.push('## 4. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
+  lines.push('## 4. 等批的提升', '', ...summarizePromotions(files), '');
+
+  lines.push('## 5. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
   return { day, text: `${lines.join('\n')}\n` };
 }
 
