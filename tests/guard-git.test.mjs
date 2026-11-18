@@ -195,13 +195,15 @@ test('推送前检查不该拦的：分离头指针、没有 origin/main、没�
 
 test('推送前检查：用桩确认解析出的来源分支和所在目录', () => {
   const calls = [];
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-cd-'));
   const opts = { cwd: '/w/repo', currentBranch: () => 'claude/x', leakedCommits: (dir, src) => (calls.push([dir, src]), null) };
-  for (const cmd of ['git push -u origin claude/x', 'git -C ../other push origin feat:claude/y', 'cd /w/b && git push', 'gh pr create -H me:claude/z', 'git push origin +claude/x'])
+  for (const cmd of ['git push -u origin claude/x', 'git -C ../other push origin feat:claude/y', `cd ${real} && git push`, 'cd /no/such/dir && git push', 'gh pr create -H me:claude/z', 'git push origin +claude/x'])
     assert.equal(decide(cmd, opts), null, cmd);
   assert.deepEqual(calls, [
     ['/w/repo', 'claude/x'],
     ['/w/other', 'feat'],
-    ['/w/b', 'claude/x'],
+    [real, 'claude/x'],
+    ['/w/repo', 'claude/x'], // cd 到不存在的目录：照旧用会话目录
     ['/w/repo', 'claude/z'],
     ['/w/repo', 'claude/x'],
   ]);
@@ -213,3 +215,18 @@ test('推送前检查：用桩确认解析出的来源分支和所在目录', ()
   assert.ok(!r.reason.includes('c5 提交 5'));
   assert.match(r.reason, /另有 2 个/);
 });
+
+test('cd 解析不出真实目录时照旧用会话目录，强推 main 的守卫不被放松（审查意见，#77）', () => {
+  // 会话目录在 main 上：cd 的目标是变量、命令替换、不存在的目录，都按会话目录判断，照样拦
+  const byDir = dir => (dir === '/w/main-repo' ? 'main' : null);
+  const opts = { cwd: '/w/main-repo', currentBranch: byDir, leakedCommits: () => null };
+  for (const cmd of ['cd "$DIR" && git push -f', 'cd $DIR && git push -f', 'cd $(git rev-parse --show-toplevel) && git push -f', 'cd `pwd` && git push -f', 'cd /no/such/dir && git push -f', 'cd - && git push -f'])
+    assert.equal(decide(cmd, opts)?.decision, 'deny', cmd);
+  // cd 到真实存在、在功能分支上的子仓库再强推：按子仓库判断，放行；强推 main 照样拦
+  withFixture(({ work }) => {
+    const main = { cwd: '/w/main-repo', currentBranch: dir => (dir === '/w/main-repo' ? 'main' : byDirReal(dir)), leakedCommits: () => null }; // 这里只测强推规则
+    assert.equal(decide(`cd ${work} && git push -f`, main), null);
+    assert.equal(decide(`cd ${work} && git push -f origin main`, main)?.decision, 'deny');
+  });
+});
+const byDirReal = dir => spawnSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout.trim() || null;

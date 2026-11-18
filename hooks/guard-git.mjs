@@ -10,6 +10,7 @@
 // 只看本机已有的引用、不 fetch；没有 origin/main、分离头指针、不在仓库里、git 出错都不拦。
 // 出错时不拦（退出码 1，hook 默认放行），只往 stderr 写原因；`node tools/doctor.mjs` 会自检这个 hook。
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isEntry, parseJson, readStdin, splitCommands, stripWrappers, tokenize } from './lib/common.mjs';
@@ -72,13 +73,19 @@ function prHead(tokens) {
 }
 const branchOf = ref => String(ref).replace(/^refs\/heads\//, '').replace(/^[^:]*:/, '');
 
-// 「cd 目录 && git push」：后面几段在 cd 进去的目录里判断（Claude 常这样写，会话目录未必是要推的仓库）
+// 「cd 目录 && git push」：后面几段在 cd 进去的目录里判断（Claude 常这样写，会话目录未必是要推的仓库）。
+// 只有解析出真实存在的目录才切换；目标含变量或命令替换（$、反引号）、回上一个目录、目录不存在时照旧用原来的目录，
+// 不然「当前在 main 上强推」会因为找不到分支而放行（审查意见，#77）。
 function cdTarget(tokens, cwd) {
   if (tokens[0] !== 'cd') return undefined;
   const arg = tokens.slice(1).find(t => !t.startsWith('-') || t === '-');
-  if (arg === '-') return cwd; // 回上一个目录：不知道是哪，照旧
-  if (!arg || arg === '~') return os.homedir();
-  return path.resolve(cwd || '.', arg.startsWith('~/') ? path.join(os.homedir(), arg.slice(2)) : arg);
+  if (arg === '-' || (arg && /[$`]/.test(arg))) return cwd;
+  const dir = !arg || arg === '~' ? os.homedir() : path.resolve(cwd || '.', arg.startsWith('~/') ? path.join(os.homedir(), arg.slice(2)) : arg);
+  try {
+    return fs.statSync(dir).isDirectory() ? dir : cwd;
+  } catch {
+    return cwd;
+  }
 }
 
 function leakReason(verb, src, leak) {
