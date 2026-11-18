@@ -115,6 +115,23 @@ test('首轮整理（#65）：还指向 ~/.claude/hooks 旧位置、或状态目
   assert.ok(r.detail.some(d => d.includes('session-organize-once/config.json')));
 });
 
+test('实跑自检含推送前检查（#76）：装的是新版就通过；装的还是旧副本只给 ⚠ 提示重装', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const ok = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'hook 实跑自检');
+  assert.equal(ok.status, 'ok');
+  assert.match(ok.detail[0], /带着本地 main 没推的提交推分支被拦下/);
+  // 换成推送前检查之前的 guard-git（只拦强推和删除 main/master）
+  const old = fs.readFileSync(path.join(dir, 'runtime', 'hooks', 'guard-git.mjs'), 'utf8').replace(/const leak = leakedCommits\([^)]*\);/g, 'const leak = null;');
+  assert.ok(old.includes('const leak = null;'));
+  fs.writeFileSync(path.join(dir, 'runtime', 'hooks', 'guard-git.mjs'), old);
+  const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  assert.equal(byName(res, '已装的 hook 与仓库一致').status, 'warn');
+  const stale = byName(res, 'hook 实跑自检');
+  assert.equal(stale.status, 'warn');
+  assert.ok(stale.detail.some(d => d.includes('旧副本') && d.includes('install.mjs --apply')));
+});
+
 test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失败', () => {
   const home = fakeHome();
   const file = path.join(home, '.claude', 'settings.json');
