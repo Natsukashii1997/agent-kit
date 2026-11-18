@@ -117,9 +117,9 @@ test('等批的提升：按「升级」行认三种写法，跳过已提升、�
   ].join('\n');
   const r = findPromotions(text);
   assert.deepEqual(r.pending, [
-    { id: 'L-02', title: 'bun 编译出的程序在 macOS 上一运行就被杀', proposed: true },
-    { id: 'L-03', title: '安装时先删旧版', proposed: false },
-    { id: 'L-04', title: 'macOS 不区分大小写', proposed: true },
+    { id: 'L-02', title: 'bun 编译出的程序在 macOS 上一运行就被杀', proposed: true, upgrade: '未升级。换个项目也成立，可提议提升为全局坑。' },
+    { id: 'L-03', title: '安装时先删旧版', proposed: false, upgrade: '未升级。' },
+    { id: 'L-04', title: 'macOS 不区分大小写', proposed: true, upgrade: '同类第 2 次，已写进 AGENTS.md「规则」。换个项目也成立，提议提升为全局 G-xx（待用户批准）。' },
   ]);
   assert.deepEqual(r.noLine, [{ id: 'L-08', title: '没有升级行的' }]);
   const out = summarizePromotions([
@@ -143,4 +143,76 @@ test('整份材料带「等批的提升」一节，会话复盘顺延为第 5 �
   const { text } = build({ dir, now: Date.parse('2026-11-18T12:00:00Z'), workRoot: root });
   assert.match(text, /## 4\. 等批的提升[\s\S]*### p1（docs\/LESSONS\.md，1 条）[\s\S]*- L-01 某个坑/);
   assert.match(text, /## 5\. 会话复盘/);
+});
+
+test('--json：第 3、4 节的机器可读版，升级首选在前，只读不写文件（#80）', async () => {
+  const { buildJson } = await import('../tools/weekly-review.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-json-'));
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  // 四种条目：再犯、提议提升、只写未升级、没有升级行
+  write('a/docs/LESSONS.md', [
+    '## L-01 又开了并行会话（2026-11-10）',
+    '- 再犯：G-04',
+    '- 升级：未升级。',
+    '## L-02 换个项目也成立的坑（2026-11-11）',
+    '- 升级：未升级。换个项目也成立，提议提升为全局 G-xx。',
+    '## L-03 只写未升级的（2026-11-12）',
+    '- 升级：未升级。',
+    '## L-04 没有升级行的（2026-11-13）',
+    '- 现象：x',
+  ].join('\n'));
+  write('b/CURRENT.md', '- 补记：再犯：G-02、G-04\n');
+  write('c/LESSONS.md', '## L-09 又一次（2026-11-14）\n- 再犯：G-02\n- 再犯：G-02\n- 再犯：G-02\n');
+  const lessonsText = [
+    '## G-02 时间（2026-10-24 提升）', '- 升级：〔机检〕已升级。',
+    '## G-04 并行会话（2026-10-24 提升）', '- 升级：〔文字〕已升级。',
+  ].join('\n');
+  const before = fs.readdirSync(root).sort();
+  const j = buildJson({ now: Date.parse('2026-11-18T02:00:00Z'), workRoot: root, lessonsText });
+  assert.equal(j.schema, 1);
+  assert.equal(j.day, '2026-11-18');
+  assert.deepEqual(j.scanned, { projects: 3, files: 3 });
+  // G-02 再犯条目更多（4 > 2），但 G-04 在〔文字〕层，是升级首选，排最前
+  assert.deepEqual(j.recurrences, [
+    { id: 'G-04', title: '并行会话', level: '文字', status: '已升级', prime: true, count: 2, projects: ['a', 'b'] },
+    { id: 'G-02', title: '时间', level: '机检', status: '已升级', prime: false, count: 4, projects: ['b', 'c'] },
+  ]);
+  assert.deepEqual(j.promotions.map(p => [p.project, p.file, p.id, p.proposed]), [
+    ['a', 'docs/LESSONS.md', 'L-01', false],
+    ['a', 'docs/LESSONS.md', 'L-02', true],
+    ['a', 'docs/LESSONS.md', 'L-03', false],
+  ]);
+  assert.equal(j.promotions[1].title, '换个项目也成立的坑');
+  assert.match(j.promotions[1].upgrade, /提议提升为全局/);
+  assert.equal(j.noUpgradeLine, 2, 'a 的 L-04、c 的 L-09 没有「升级」行');
+  assert.deepEqual(fs.readdirSync(root).sort(), before);
+
+  // 命令行：只打印 JSON，不写 weekly/，不跑自检
+  const { spawnSync } = await import('node:child_process');
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-json-state-'));
+  const r = spawnSync(process.execPath, [new URL('../tools/weekly-review.mjs', import.meta.url).pathname, '--json'], {
+    encoding: 'utf8',
+    env: { ...process.env, AGENT_KIT_WORK_ROOT: root, AGENT_KIT_STATE_DIR: state },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.schema, 1);
+  assert.deepEqual(out.recurrences.map(x => x.id).sort(), ['G-02', 'G-04']);
+  assert.deepEqual(fs.readdirSync(state), [], '状态目录里什么都没写');
+});
+
+test('--json 和 Markdown 的再犯、等批两节出自同一份汇总（#80）', async () => {
+  const { buildJson, summarizeRecurrence, summarizePromotions, projectFiles } = await import('../tools/weekly-review.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-json2-'));
+  fs.mkdirSync(path.join(root, 'p', 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'p', 'docs', 'LESSONS.md'), '## L-01 x（2026-11-01）\n- 再犯：G-07\n- 升级：未升级，提议提升。\n');
+  const j = buildJson({ workRoot: root, lessonsText: '' });
+  const files = projectFiles(root);
+  assert.match(summarizeRecurrence(files).join('\n'), new RegExp(`\\| ${j.recurrences[0].id} .*\\| ${j.recurrences[0].count} \\| p \\|`));
+  assert.match(summarizePromotions(files).join('\n'), /- L-01 x 〔提议〕/);
+  assert.equal(j.promotions[0].proposed, true);
+  assert.equal(j.recurrences[0].level, null);
 });

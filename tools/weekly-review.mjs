@@ -10,9 +10,11 @@
 //      按项目列出；没有「升级」行的单独计数。给「提案 7 天收口」（《工程流程》8.2）当清单用。
 // 会话复盘本身用 my-skills 的 session-retro（my-skills#28），这里不重复做。
 // 它只汇总、不下结论，也不写任何规则；「哪条该升级、哪个是新坑」由每周整理的人来判断，照 LESSONS「只出提案」。
-// 不带调度：什么时候跑由每周整理的人定（定时另议，#76）。
+// 自己不带调度。第 3、4 节另有机器可读输出 --json（#80）：数字分身每周提案收口（digital-twin proposal_digest.py）
+// 每周一调起它，把「再犯」和〔提议〕的条目列进待决提案卡片；怎么认这两种条目只在这里做一份，那边只消费结果。
 //   node tools/weekly-review.mjs            生成并打印文件路径
 //   node tools/weekly-review.mjs --stdout   直接打印内容
+//   node tools/weekly-review.mjs --json     只打印第 3、4 节的 JSON（只读：不跑自检、不写 weekly/）
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -101,15 +103,20 @@ const scanned = files => {
 // levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选。
 const WEAK = ['文字', '提醒'];
 
-// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）。
-export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
+// 按坑汇总再犯：[[坑, { n: 再犯条目数, projects: Set }]]，条目数多的在前。Markdown 和 --json 共用（#80）。
+export function recurrenceRows(files) {
   const by = {};
   for (const f of files) for (const id of findRecurrences(f.text)) {
     by[id] ||= { n: 0, projects: new Set() };
     by[id].n += 1;
     by[id].projects.add(f.project);
   }
-  const rows = Object.entries(by).sort((a, b) => b[1].n - a[1].n);
+  return Object.entries(by).sort((a, b) => b[1].n - a[1].n);
+}
+
+// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）。
+export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
+  const rows = recurrenceRows(files);
   const head = scanned(files);
   if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目（或 CURRENT.md 的记录）里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
   const prime = rows.filter(([id]) => WEAK.includes(levels[id])).map(([id]) => id);
@@ -150,14 +157,24 @@ export function findPromotions(text) {
   }
   const open = entries.filter(e => !e.promoted);
   return {
-    pending: open.filter(e => e.upgrades.some(l => PENDING.test(l))).map(e => ({ id: e.id, title: e.title, proposed: e.upgrades.some(l => /提议提升/.test(l)) })),
+    pending: open.filter(e => e.upgrades.some(l => PENDING.test(l))).map(e => ({
+      id: e.id,
+      title: e.title,
+      proposed: e.upgrades.some(l => /提议提升/.test(l)),
+      upgrade: e.upgrades.map(l => l.replace(/^\s*-\s*升级[：:]\s*/, '')).join(' / '),
+    })),
     noLine: open.filter(e => !e.upgrades.length).map(e => ({ id: e.id, title: e.title })),
   };
 }
 
+// 每份项目 LESSONS 的等批和没有「升级」行的条目。Markdown 和 --json 共用（#80）。
+export function promotionsByFile(files) {
+  return files.filter(f => isLessons(f.name)).map(f => ({ ...f, ...findPromotions(f.text) }));
+}
+
 export function summarizePromotions(files) {
   const lessons = files.filter(f => isLessons(f.name));
-  const by = lessons.map(f => ({ ...f, ...findPromotions(f.text) }));
+  const by = promotionsByFile(files);
   const total = by.reduce((n, f) => n + f.pending.length, 0);
   const noLine = by.reduce((n, f) => n + f.noLine.length, 0);
   const lines = [
@@ -176,16 +193,46 @@ export function summarizePromotions(files) {
   return lines;
 }
 
-export function build({ now = Date.now(), dir = stateDir(), workRoot = process.env.AGENT_KIT_WORK_ROOT || path.join(os.homedir(), 'Documents', 'ChatGPT', '个人', 'work') } = {}) {
+const defaultWorkRoot = () => process.env.AGENT_KIT_WORK_ROOT || path.join(os.homedir(), 'Documents', 'ChatGPT', '个人', 'work');
+
+// 全局 LESSONS 里每条坑的标题、层级、状态
+function globalLessons(text = fs.readFileSync(LESSONS_FILE, 'utf8')) {
+  const lessons = parseLessons(text);
+  return {
+    titles: Object.fromEntries(lessons.map(e => [e.id, e.title])),
+    levels: Object.fromEntries(lessons.filter(e => e.level).map(e => [e.id, e.level])),
+    statuses: Object.fromEntries(lessons.map(e => [e.id, e.status])),
+  };
+}
+
+// --json：第 3、4 节的机器可读版（#80），字段改了要把 schema 加一，消费方（digital-twin proposal_digest.py）按 schema 认。
+//   recurrences：按坑汇总的再犯，升级首选（〔文字〕〔提醒〕层又再犯）在前，其余按再犯条目数；
+//   promotions：项目 LESSONS 里等批的条目，proposed 为 true 的是升级行明确写了「提议提升」的（Markdown 里的〔提议〕）。
+// 只读：不跑自检、不写文件。
+export function buildJson({ now = Date.now(), workRoot = defaultWorkRoot(), lessonsText } = {}) {
+  const { titles, levels, statuses } = globalLessons(lessonsText);
+  const files = projectFiles(workRoot);
+  const recurrences = recurrenceRows(files)
+    .map(([id, v]) => ({ id, title: titles[id] || '', level: levels[id] || null, status: statuses[id] || null, prime: WEAK.includes(levels[id]), count: v.n, projects: [...v.projects] }))
+    .sort((a, b) => b.prime - a.prime || b.count - a.count);
+  const byFile = promotionsByFile(files);
+  return {
+    schema: 1,
+    day: new Date(now).toISOString().slice(0, 10),
+    scanned: { projects: new Set(files.map(f => f.project)).size, files: files.length },
+    recurrences,
+    promotions: byFile.flatMap(f => f.pending.map(e => ({ project: f.project, file: f.name, ...e }))),
+    noUpgradeLine: byFile.reduce((n, f) => n + f.noLine.length, 0),
+  };
+}
+
+export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWorkRoot() } = {}) {
   const day = new Date(now).toISOString().slice(0, 10);
   const lines = [`# 每周整理输入（${day}）`, '', '自动汇总，只是材料，不是结论。新坑、升级都按 LESSONS 只出提案。', ''];
 
   lines.push('## 1. agent-kit 自检', '', '```', ...formatReport(runDoctor({ dir }), new Date(now).toISOString()), '```', '');
 
-  const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
-  const titles = Object.fromEntries(lessons.map(e => [e.id, e.title]));
-  const levels = Object.fromEntries(lessons.filter(e => e.level).map(e => [e.id, e.level]));
-  const statuses = Object.fromEntries(lessons.map(e => [e.id, e.status]));
+  const { titles, levels, statuses } = globalLessons();
   let hits = '';
   try {
     hits = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8');
@@ -203,15 +250,19 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = process.e
 
 if (isEntry(import.meta.url)) {
   try {
-    const dir = stateDir();
-    const { day, text } = build({ dir });
-    if (process.argv.includes('--stdout')) process.stdout.write(text);
+    // --json 不用 process.exit 收尾：macOS 上写管道是异步的，提前退出会截断输出
+    if (process.argv.includes('--json')) process.stdout.write(`${JSON.stringify(buildJson(), null, 2)}\n`);
     else {
-      const out = path.join(dir, 'weekly');
-      fs.mkdirSync(out, { recursive: true });
-      const file = path.join(out, `${day}.md`);
-      fs.writeFileSync(file, text);
-      console.log(file);
+      const dir = stateDir();
+      const { day, text } = build({ dir });
+      if (process.argv.includes('--stdout')) process.stdout.write(text);
+      else {
+        const out = path.join(dir, 'weekly');
+        fs.mkdirSync(out, { recursive: true });
+        const file = path.join(out, `${day}.md`);
+        fs.writeFileSync(file, text);
+        console.log(file);
+      }
     }
   } catch (err) {
     console.error(`每周汇总中断：${err.message}`);
