@@ -100,8 +100,11 @@ const scanned = files => {
   return `扫了 ${projects.size} 个项目的 ${files.length} 份文件（${names.join('、') || '无'}）。`;
 };
 
-// levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选。
+// levels：坑 → 层级词（LESSONS「升级」一行开头，#57）。〔文字〕〔提醒〕层又再犯的单列为升级首选；
+// 「关闭」的坑（已被代码消除）不进首选，又再犯时单列，先核实关闭依据。
 const WEAK = ['文字', '提醒'];
+const isPrime = (level, status) => WEAK.includes(level) && status !== '关闭';
+const statusMark = status => (status === '部分升级' ? '部分' : status === '关闭' ? '关闭' : '');
 
 // 按坑汇总再犯：[[坑, { n: 再犯条目数, projects: Set }]]，条目数多的在前。Markdown 和 --json 共用（#80）。
 export function recurrenceRows(files) {
@@ -114,20 +117,22 @@ export function recurrenceRows(files) {
   return Object.entries(by).sort((a, b) => b[1].n - a[1].n);
 }
 
-// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）。
+// statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）；「关闭」显示「关闭」。
 export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
   const rows = recurrenceRows(files);
   const head = scanned(files);
   if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目（或 CURRENT.md 的记录）里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
-  const prime = rows.filter(([id]) => WEAK.includes(levels[id])).map(([id]) => id);
+  const prime = rows.filter(([id]) => isPrime(levels[id], statuses[id])).map(([id]) => id);
+  const reopened = rows.filter(([id]) => statuses[id] === '关闭').map(([id]) => id);
   return [
     head,
     '',
     '| 坑 | 层级 | 再犯条目数 | 项目 |',
     '|---|---|---|---|',
-    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${levels[id] ? `〔${levels[id]}〕${statuses[id] === '部分升级' ? '部分' : ''}` : '—'} | ${v.n} | ${[...v.projects].join('、')} |`),
+    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${levels[id] ? `〔${levels[id]}〕${statusMark(statuses[id])}` : '—'} | ${v.n} | ${[...v.projects].join('、')} |`),
     '',
     ...(prime.length ? [`升级首选（〔文字〕〔提醒〕层又再犯）：${prime.join('、')}。按 LESSONS「怎么升级」从〔结构〕往下找第一个做得到的层。`, ''] : []),
+    ...(reopened.length ? [`已关闭又再犯：${reopened.join('、')}。先核实关闭的依据（坑已被代码消除）还成不成立，不成立就撤回关闭，按「怎么升级」重新选层。`, ''] : []),
     '看法提示：〔结构〕〔机检〕〔体检〕层的坑还在再犯，说明那一层没拦住，要改检查或换层；〔文字〕〔提醒〕层的再犯，就是文字没被遵守，往上升。',
   ];
 }
@@ -135,6 +140,8 @@ export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = 
 // 项目 LESSONS 的条目：「## L-01 标题」这类带编号的二级标题，到下一个二级标题为止；代码块里的格式样例不算。
 // G-xx 是全局条目（agent-kit 自己的 LESSONS.md），本来就在全局，不算等批。
 const PENDING = /提议提升|未升级/; // 「可提议提升」也含「提议提升」
+// 「关闭」的条目（坑已被代码消除）不算等批，哪怕后面保留的旧记录里写着「未升级」
+const CLOSED = /^\s*-\s*升级[：:]\s*(?:〔[^〕]*〕)?\s*关闭/;
 const PROMOTED = /提升[：:]\s*已提升/;
 
 export function findPromotions(text) {
@@ -155,7 +162,7 @@ export function findPromotions(text) {
     if (/^\s*-\s*升级[：:]/.test(line)) cur.upgrades.push(line);
     if (PROMOTED.test(line)) cur.promoted = true;
   }
-  const open = entries.filter(e => !e.promoted);
+  const open = entries.filter(e => !e.promoted && !e.upgrades.some(l => CLOSED.test(l)));
   return {
     pending: open.filter(e => e.upgrades.some(l => PENDING.test(l))).map(e => ({
       id: e.id,
@@ -180,7 +187,7 @@ export function summarizePromotions(files) {
   const lines = [
     `${scanned(lessons)}等批 ${total} 条，另有 ${noLine} 条没有「升级」行。`,
     '',
-    '口径：项目 LESSONS 里「升级」行写着「可提议提升」「提议提升」「未升级」、并且没有「提升：已提升为全局 G-xx」的条目；〔提议〕是升级行里明确写了提议提升的。',
+    '口径：项目 LESSONS 里「升级」行写着「可提议提升」「提议提升」「未升级」、并且没有「提升：已提升为全局 G-xx」、没有标「关闭」的条目；〔提议〕是升级行里明确写了提议提升的。',
     '',
   ];
   for (const f of by.filter(f => f.pending.length).sort((a, b) => b.pending.length - a.pending.length)) {
@@ -213,7 +220,7 @@ export function buildJson({ now = Date.now(), workRoot = defaultWorkRoot(), less
   const { titles, levels, statuses } = globalLessons(lessonsText);
   const files = projectFiles(workRoot);
   const recurrences = recurrenceRows(files)
-    .map(([id, v]) => ({ id, title: titles[id] || '', level: levels[id] || null, status: statuses[id] || null, prime: WEAK.includes(levels[id]), count: v.n, projects: [...v.projects] }))
+    .map(([id, v]) => ({ id, title: titles[id] || '', level: levels[id] || null, status: statuses[id] || null, prime: isPrime(levels[id], statuses[id]), count: v.n, projects: [...v.projects] }))
     .sort((a, b) => b.prime - a.prime || b.count - a.count);
   const byFile = promotionsByFile(files);
   return {
