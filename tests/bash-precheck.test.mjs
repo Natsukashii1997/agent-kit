@@ -200,3 +200,75 @@ test('pkill -f 的拒绝说明：讲清为什么、给出 TaskStop 和 pgrep 看
   assert.match(reason, /pgrep -fl/);
   assert.doesNotMatch(reason, /危险 rm/);
 });
+
+// ---- env：读别的进程的环境变量（全局坑 G-42，2026-11-19）----
+
+test('磁盘瘦身 L-13 第②点的原命令：拦下', () => {
+  // 2026-11-18 磁盘瘦身会话（claude/memory 分支）原样：想把会话进程对上桌面版会话，输出里带出了登录令牌明文
+  const cmd = `ps eww -o command= -p 1551 | tr ' ' '\\n' | grep -i -E "session|local_|CLAUDE" | cut -c1-160 | head -20`;
+  assert.equal(kindOf(cmd), 'env-ps-environment');
+});
+
+test('ps 显示环境变量的各种写法、读 /proc/<pid>/environ：拦下', () => {
+  for (const cmd of [
+    'ps eww -p 3998',
+    'ps e -p 1',
+    'ps auxe',
+    'ps axeww',
+    'ps Eww 1',
+    'ps -E -o command= -p 94974',
+    'ps -axE -ww -o pid,ppid,command | grep abc',
+    'ps -wwE -p 1',
+    'ps -o command= -E -p 1',
+    'sudo ps eww 1',
+    '/bin/ps -Eww -p 1',
+    'LC_ALL=C ps eww -p 1',
+    'PID=$(pgrep -f gateway | head -1); ps eww -p $PID',
+    'X=$(ps eww -p 1 | grep -c PATH); echo $X',
+    'cat /proc/1/environ',
+    "tr '\\0' '\\n' < /proc/$PID/environ",
+    'xargs -0 -n1 </proc/self/environ',
+  ])
+    assert.match(kindOf(cmd) ?? '', /^env-/, cmd);
+});
+
+test('平常看进程的写法、只是提到的命令：不管', () => {
+  for (const cmd of [
+    'ps aux',
+    'ps -ef', // macOS 的 -e 是「所有进程」，不是环境变量
+    'ps -e -o pid,comm',
+    'ps -A | grep electron',
+    'ps -axww -o pid,command',
+    'ps axo pid,ppid,stat,etime,command',
+    'ps -o etime= -p 89175',
+    'ps -O etime -p 1',
+    'ps -p 1 -o comm=',
+    'ps -o pid,lstart,command -p $(pgrep -f "MacOS/PostPane$" | tail -1)',
+    'ps -o lstart= -p $(pgrep -x PostPane | head -1)',
+    'LC_ALL=en_US.UTF-8 ps -p 1 -o comm=',
+    'ps -u me',
+    'ps -U root -o pid,command',
+    'ps -t ttys001',
+    'env | cut -d= -f1',
+    'echo "不要用 ps eww"',
+    'git commit -m "拦下 ps eww 和 /proc/1/environ"',
+    'grep -n environ notes.md',
+    "cat > /w/note.md <<'EOF'\nps eww -p 1\nEOF",
+  ])
+    assert.equal(kindOf(cmd), null, cmd);
+});
+
+test('读环境变量的拒绝说明：讲清为什么、给出只看名字和不打印值的改法，不提危险 rm', () => {
+  const out = JSON.parse(hookOutput(check('ps eww -p 1', ENV)));
+  const reason = out.hookSpecificOutput.permissionDecisionReason;
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(reason, /env-ps-environment/);
+  assert.match(reason, /G-42/);
+  assert.match(reason, /登录令牌/);
+  assert.match(reason, /env \| cut -d= -f1/);
+  assert.match(reason, /shasum/);
+  assert.doesNotMatch(reason, /危险 rm/);
+  const proc = JSON.parse(hookOutput(check('cat /proc/1/environ', ENV))).hookSpecificOutput.permissionDecisionReason;
+  assert.match(proc, /env-proc-environ/);
+  assert.match(proc, /\/proc\/1\/environ/);
+});

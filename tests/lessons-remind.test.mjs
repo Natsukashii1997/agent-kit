@@ -47,6 +47,48 @@ test('典型命令命中对应的坑', () => {
   assert.ok(ids('srv.set_timeout(Duration::from_secs(3));').includes('G-30'));
   assert.ok(ids('pub(crate) const APPROVAL_WAIT_ALLOWED_MINUTES = [0, 1, 3];').includes('G-31'));
   assert.ok(ids("pkill -f 'pnpm test'").includes('G-32'));
+  // 2026-11-19 并入的几处（积压清单组 13）
+  assert.ok(ids("proxy: { '/api': { target: api, changeOrigin: false } }").includes('G-07'));
+  assert.ok(ids('[mcp_servers.agent-hud.tools.relay_to_chatgpt]\napproval_mode = "approve"').includes('G-26'));
+  assert.ok(ids('grep -n -A8 agent-hud ~/.codex/config.toml').includes('G-26'));
+  // 2026-11-19 新增 G-33～G-44（积压清单第二批）
+  assert.ok(ids('.initialization_script(include_str!("collapse.js"))').includes('G-33'));
+  assert.ok(ids('webView.evaluateJavaScript("window.__collapse()")').includes('G-33'));
+  assert.ok(ids('    struct Fake {\n        reaches: bool,').includes('G-34'));
+  assert.ok(ids('await browser.runtime.sendMessage({ type: "capture" })').includes('G-35'));
+  assert.ok(ids('chrome.runtime.onInstalled.addListener(reinject)').includes('G-35'));
+  assert.ok(ids('document.querySelectorAll(\'[data-message-author-role="assistant"]\')').includes('G-36'));
+  assert.ok(ids("const units = document.querySelectorAll('[data-chatgpt-search-unit-key$=\":assistant\"]')").includes('G-36'));
+  assert.ok(ids('let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: p, mouseButton: .left)\ndown?.post(tap: .cghidEventTap)').includes('G-37'));
+  assert.ok(ids('ps -p "$pid" -o comm= | grep -qx "$want"').includes('G-38'));
+  assert.ok(ids('XCTAssertTrue(path.hasPrefix("/var/folders/"))').includes('G-38'));
+  assert.ok(ids('struct AlertSettings: Codable, Equatable {').includes('G-39'));
+  assert.ok(ids('let s = try? JSONDecoder().decode(Alerts.self, from: data)').includes('G-39'));
+  assert.ok(ids("cp src/relay.rs /w/relay.rs.bak && sed -i '' 's/queue(/leave(/' src/relay.rs && cargo test -p host; cp /w/relay.rs.bak src/relay.rs").includes('G-40'));
+  assert.ok(ids('git checkout -- src/crates/host/src/relay.rs').includes('G-40'));
+  assert.ok(ids('try FileManager.default.removeItem(at: staging)').includes('G-41'));
+  assert.ok(ids('shutil.rmtree(staging)').includes('G-41'));
+  assert.ok(ids(`ps eww -o command= -p 1551 | tr ' ' '\\n' | grep -i -E "session|local_|CLAUDE"`).includes('G-42'));
+  assert.ok(ids('cat /proc/1/environ').includes('G-42'));
+  assert.ok(ids("const OWNER_OPEN_ID = 'ou_77e9a1b2c3d4';").includes('G-43'));
+  assert.ok(ids('lark-cli im +messages-send --receive-id-type open_id').includes('G-43'));
+  assert.ok(ids("import '@fontsource/geist-sans/400.css';").includes('G-44'));
+});
+
+test('2026-11-19 新增触发词：平常写法不误报', () => {
+  for (const cmd of [
+    'ps aux | grep node',
+    'ps -ef',
+    'ps -o pid,command -p 1',
+    'const fake = makeFakeHost()',
+    'git checkout main',
+    'git checkout -b claude/x origin/main',
+    'sed -i "" "s/a/b/" README.md',
+    'rm -rf node_modules',
+    'cat ~/.codex/AGENTS.md',
+    'npm run build',
+  ])
+    assert.deepEqual(ids(cmd).filter(id => id >= 'G-33'), [], cmd);
 });
 
 test('普通命令不误报', () => {

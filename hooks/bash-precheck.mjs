@@ -9,8 +9,9 @@
 // 规则来自近 14 天 66280 条真实 Bash 记录里被拦或卡死的 41 条，分两类：
 //   rm   ：rm/rmdir 的目标 Claude Code 解析不出来（变量加通配符、整目录通配、可能为空的变量）
 //   parse：命令里有 Claude Code 解析不了的写法（`$$(`、`\\$(`）
-// 另有一类不是为了防卡住（全局坑 G-32，2026-11-19）：
-//   kill ：宽泛的 `pkill -f`（模式里没有路径、端口号、文件名，如 'pnpm test'、'cargo test'），会杀掉别的会话正在跑的同名进程
+// 另有两类不是为了防卡住（2026-11-19）：
+//   kill ：宽泛的 `pkill -f`（模式里没有路径、端口号、文件名，如 'pnpm test'、'cargo test'），会杀掉别的会话正在跑的同名进程（全局坑 G-32）
+//   env  ：读别的进程的环境变量（`ps eww`、`ps -E`、`/proc/<pid>/environ`），会把登录令牌明文打进会话记录（全局坑 G-42）
 // 命中记一行到状态目录的 bash-precheck-hits.jsonl（时间、会话、目录、类别，不记命令内容）。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -217,9 +218,80 @@ export function checkKill(command) {
   return null;
 }
 
+// 命令替换 $( … ) 和 ` … ` 里面的命令（含嵌套），segments 把它们整段算在一个词里，这里单独拿出来看。
+function substBodies(command) {
+  const out = [];
+  for (let i = 0; i < command.length; i++) {
+    if (command[i] === '\\') {
+      i++;
+      continue;
+    }
+    if ((command[i] === '$' && command[i + 1] === '(') || command[i] === '`') {
+      const open = command[i] === '`' ? i : i + 1;
+      const end = closeOf(command, open);
+      const body = command.slice(open + 1, end);
+      out.push(body, ...substBodies(body));
+      i = end;
+    }
+  }
+  return out;
+}
+
+// 读别的进程的环境变量（全局坑 G-42，2026-11-19）。返回 { kind, target, detail } 或 null。
+// ps：带横线的选项里只有大写 E 显示环境变量（macOS 的 -e 是「所有进程」，不拦）；不带横线的 BSD 写法只认第一个参数
+// （macOS 的 ps 只在第一个参数认它，后面的不带横线的词会报 illegal argument），里面有 e 或 E 就算（e、eww、auxe）。
+// 带参数的选项（-o 格式、-p 进程号等）跳过它的值，值里的字母不算；$( … ) 里的命令另外单独看。
+// /proc/<pid>/environ：读它的命令（cat、xargs、重定向）；echo、printf、git、gh 里只是提到的不算。
+const PS_ARG = new Set(['G', 'M', 'N', 'O', 'U', 'g', 'o', 'p', 't', 'u']);
+const ENVIRON = /^<?\/proc\/[^/\s]+\/environ$/;
+const MENTION_ONLY = new Set(['echo', 'printf', 'git', 'gh']);
+
+function psShowsEnv(args) {
+  if (/^[A-Za-z]+$/.test(args[0] ?? '') && /[eE]/.test(args[0])) return true;
+  for (let i = 0; i < args.length; i++) {
+    if (!/^-[A-Za-z]+$/.test(args[i])) continue;
+    const letters = args[i].slice(1);
+    for (let j = 0; j < letters.length; j++) {
+      if (letters[j] === 'E') return true;
+      if (PS_ARG.has(letters[j])) {
+        if (j === letters.length - 1) i++;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+// 把 $( … ) 和 ` … ` 整段换成一个占位词，免得里面的 head、sed 被当成 ps 的参数。
+function blankSubst(seg) {
+  let out = '';
+  for (let i = 0; i < seg.length; i++) {
+    if ((seg[i] === '$' && seg[i + 1] === '(') || seg[i] === '`') {
+      i = closeOf(seg, seg[i] === '`' ? i : i + 1);
+      out += '_';
+    } else out += seg[i];
+  }
+  return out;
+}
+
+export function checkEnv(command) {
+  const stripped = stripHeredocBodies(command);
+  for (const seg of [stripped, ...substBodies(stripped)].flatMap(segments)) {
+    const words = stripWrappers(tokenize(blankSubst(seg)));
+    if (!words.length) continue;
+    const name = path.basename(words[0]);
+    if (name === 'ps' && psShowsEnv(words.slice(1)))
+      return { kind: 'env-ps-environment', target: seg, detail: '`ps` 带了显示环境变量的选项（`-E`，或不带横线的 `e`），会把进程的环境变量连值一起打出来' };
+    if (MENTION_ONLY.has(name)) continue;
+    const file = words.find(w => ENVIRON.test(w));
+    if (file) return { kind: 'env-proc-environ', target: file.replace(/^</, ''), detail: '`/proc/<进程号>/environ` 是那个进程的全部环境变量，连值一起' };
+  }
+  return null;
+}
+
 export function check(command, env = process.env) {
   if (typeof command !== 'string' || !command) return null;
-  return checkParse(command) || checkRm(command, env) || checkKill(command);
+  return checkParse(command) || checkRm(command, env) || checkKill(command) || checkEnv(command);
 }
 
 const FIX = {
@@ -232,7 +304,20 @@ const FIX = {
   'kill-pkill-broad': '停自己开的后台任务用任务 ID（Claude Code 的 TaskStop，或 shell 里记下的 `$!`）。确实要按进程停：先 `pgrep -fl \'<写到本 worktree 绝对路径的模式>\'` 看清是哪几个 PID（列表里包着这条命令的 shell 自己也会出现，别杀它），再 `kill <PID>`；或者把模式写到能只认出自己的程度（本 worktree 的绝对路径、自己的端口号、脚本文件名）。',
 };
 
+const ENV_FIX = [
+  '想知道进程是谁：用命令行参数 `ps -o pid,ppid,command -p <PID>`（不带 `E`），或看程序自己的会话记录、日志。',
+  '只要变量名：当前 shell 的用 `env | cut -d= -f1`（只出名字）；别的进程的，看它的启动配置（launchd plist、启动脚本）里写了哪些名字。',
+  '只想知道某个变量有没有、对不对：`[ -n "${变量:-}" ] && echo 已设置 || echo 未设置`；要比对值就比摘要 `printf %s "$变量" | shasum -a 256 | cut -c1-12`，不打印值。别的进程的，请常浩在自己的终端里查，只回报有没有。',
+].join('\n- ');
+
 export function reasonFor(hit) {
+  if (hit.kind.startsWith('env-'))
+    return [
+      `agent-kit 预检已拦下（${hit.kind}）：${hit.detail}：\`${hit.target}\`。`,
+      'Claude 桌面版等程序把登录令牌放在子进程的环境变量里，打出来就原样进了会话记录（磁盘瘦身 L-13 第②点：`ps eww` 的输出里有登录令牌明文）。见全局坑 G-42。',
+      `怎么改：\n- ${ENV_FIX}`,
+      '不要换一种写法去读同样的内容（套进 `bash -c`、用 Python 读进程参数）；这条拦的是「把值打出来」，不是某个命令。',
+    ].join('\n');
   if (hit.kind.startsWith('kill-'))
     return [
       `agent-kit 预检已拦下（${hit.kind}）：${hit.detail}：\`${hit.target}\`。`,
