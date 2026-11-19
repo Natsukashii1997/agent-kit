@@ -9,6 +9,8 @@
 // 规则来自近 14 天 66280 条真实 Bash 记录里被拦或卡死的 41 条，分两类：
 //   rm   ：rm/rmdir 的目标 Claude Code 解析不出来（变量加通配符、整目录通配、可能为空的变量）
 //   parse：命令里有 Claude Code 解析不了的写法（`$$(`、`\\$(`）
+// 另有一类不是为了防卡住（全局坑 G-32，2026-11-19）：
+//   kill ：宽泛的 `pkill -f`（模式里没有路径、端口号、文件名，如 'pnpm test'、'cargo test'），会杀掉别的会话正在跑的同名进程
 // 命中记一行到状态目录的 bash-precheck-hits.jsonl（时间、会话、目录、类别，不记命令内容）。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -175,9 +177,49 @@ export function checkParse(command) {
   return null;
 }
 
+// 宽泛的 pkill -f（含 -9f 这类合写、--full）。返回 { kind, target, detail } 或 null。
+// 带参数的选项（-u root、-t ttys001 等）跳过它的值；第一个不以 - 开头的词是匹配模式，之后不再看选项。
+// 「宽泛」：模式里没有能把范围收到自己身上的锚点：路径（含 /）、端口号这类 4 位以上数字、带扩展名的文件名
+// （wb_server.py、http.server）。近 14 天 95567 条真实 Bash 里 pkill -f 有 320 条，多数是按端口或脚本名精确重启
+// 自己的开发服务，全拦误伤太大；L-33、L-37 的 'pnpm test'、'cargo test --workspace' 都没有锚点。
+export function isBroadPattern(pattern) {
+  const p = pattern.replace(/^['"]|['"]$/g, '');
+  if (!p.trim()) return true;
+  return !/\//.test(p) && !/\d{4,}/.test(p) && !/\w\.[A-Za-z]/.test(p);
+}
+
+const PKILL_ARG_OPTS = new Set(['-c', '-F', '-g', '-G', '-j', '-P', '-s', '-t', '-T', '-u', '-U']);
+export function checkKill(command) {
+  for (const seg of segments(stripHeredocBodies(command))) {
+    const words = stripWrappers(tokenize(seg));
+    if (!words.length || path.basename(words[0]) !== 'pkill') continue;
+    let full = false;
+    let pattern = '';
+    for (let i = 1; i < words.length; i++) {
+      const w = words[i];
+      if (w === '--') {
+        pattern = words[i + 1] ?? '';
+        break;
+      }
+      if (w === '--full') full = true;
+      else if (PKILL_ARG_OPTS.has(w)) i++;
+      else if (/^-[A-Za-z0-9]+$/.test(w)) {
+        if (/^-\d+$/.test(w) || /^-[A-Z]+$/.test(w)) continue; // 信号：-9、-KILL
+        if (w.slice(1).includes('f')) full = true;
+      } else {
+        pattern = w;
+        break;
+      }
+    }
+    if (full && isBroadPattern(pattern))
+      return { kind: 'kill-pkill-broad', target: pattern || seg, detail: '`pkill -f` 按整条命令行匹配本机所有进程、不分是谁开的，这个模式里没有路径、端口号或文件名能把范围收到自己身上' };
+  }
+  return null;
+}
+
 export function check(command, env = process.env) {
   if (typeof command !== 'string' || !command) return null;
-  return checkParse(command) || checkRm(command, env);
+  return checkParse(command) || checkRm(command, env) || checkKill(command);
 }
 
 const FIX = {
@@ -187,9 +229,16 @@ const FIX = {
   'rm-substitution': '先把命令替换的结果存进变量并检查不为空，再用 `"${变量:?}"` 删；或者写明路径。',
   'parse-dollar-dollar': '要嵌的代码先用 Write 工具写成文件（放 scratchpad），再用一条简单命令执行它；不要把代码放在 heredoc 或引号里。',
   'parse-escaped-subst': '把这段文字放进单引号，或者先用 Write 工具写成文件再用；不要在双引号里写 `\\\\$(`。',
+  'kill-pkill-broad': '停自己开的后台任务用任务 ID（Claude Code 的 TaskStop，或 shell 里记下的 `$!`）。确实要按进程停：先 `pgrep -fl \'<写到本 worktree 绝对路径的模式>\'` 看清是哪几个 PID（列表里包着这条命令的 shell 自己也会出现，别杀它），再 `kill <PID>`；或者把模式写到能只认出自己的程度（本 worktree 的绝对路径、自己的端口号、脚本文件名）。',
 };
 
 export function reasonFor(hit) {
+  if (hit.kind.startsWith('kill-'))
+    return [
+      `agent-kit 预检已拦下（${hit.kind}）：${hit.detail}：\`${hit.target}\`。`,
+      '并行的会话、子 agent 共用这台机器，按命令名广撒会把别人正在跑的同名进程也杀掉（驿窗 #261 中断了 #264、#265 的全量测试）；包着这条命令的 shell 命令行里也有这串字，也可能把自己杀了（驿窗 L-37，未能排除）。见全局坑 G-32。',
+      `怎么改：${FIX[hit.kind]}`,
+    ].join('\n');
   return [
     `agent-kit 预检已拦下（${hit.kind}）：这条命令会触发 Claude Code 内置的「危险 rm」安全检查。${hit.detail}：\`${hit.target}\`。`,
     '这个检查在 bypass 模式下也要人批准，而本机的批准请求会被驿窗接走、Claude 窗口里不弹，没人点的话会话会卡约 16 分钟后被判「stopped responding」。',

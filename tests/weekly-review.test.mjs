@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { build, summarizeHits } from '../tools/weekly-review.mjs';
 
 test('命中统计：只算近 7 天，按次数排序，附项目名', () => {
@@ -193,7 +194,7 @@ test('--json：第 3、4 节的机器可读版，升级首选在前，只读不�
   // 命令行：只打印 JSON，不写 weekly/，不跑自检
   const { spawnSync } = await import('node:child_process');
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-json-state-'));
-  const r = spawnSync(process.execPath, [new URL('../tools/weekly-review.mjs', import.meta.url).pathname, '--json'], {
+  const r = spawnSync(process.execPath, [fileURLToPath(new URL('../tools/weekly-review.mjs', import.meta.url)), '--json'], {
     encoding: 'utf8',
     env: { ...process.env, AGENT_KIT_WORK_ROOT: root, AGENT_KIT_STATE_DIR: state },
   });
