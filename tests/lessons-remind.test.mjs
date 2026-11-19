@@ -44,6 +44,9 @@ test('典型命令命中对应的坑', () => {
   assert.ok(ids('#!/bin/bash\nset -euo pipefail').includes('G-08'));
   assert.ok(ids('hermes config set skills.disabled obsidian').includes('G-29'));
   assert.ok(ids('# 故意改坏：去掉装配置的锁').includes('G-29'));
+  assert.ok(ids('srv.set_timeout(Duration::from_secs(3));').includes('G-30'));
+  assert.ok(ids('pub(crate) const APPROVAL_WAIT_ALLOWED_MINUTES = [0, 1, 3];').includes('G-31'));
+  assert.ok(ids("pkill -f 'pnpm test'").includes('G-32'));
 });
 
 test('普通命令不误报', () => {

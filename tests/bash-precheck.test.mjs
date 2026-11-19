@@ -148,3 +148,55 @@ test('输入坏了：不报错、不拦', () => {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, '');
 });
+
+// ---- kill：pkill -f（全局坑 G-32，2026-11-19）----
+
+test('驿窗 L-33、L-37 的原命令：拦下', () => {
+  // L-33（#261）：停自己的基线测试，把 #264、#265 正在跑的全量测试也杀了
+  assert.equal(kindOf("pkill -f 'pnpm test'; pkill -f 'cargo test'"), 'kill-pkill-broad');
+  // L-37（#282）：全量测试那条 Bash 前面先停旧测试，包着命令的 shell 也匹配上
+  assert.equal(kindOf("pkill -f 'cargo test --workspace'; cd /w && pnpm run check && pnpm test > /w/t.log 2>&1"), 'kill-pkill-broad');
+});
+
+test('宽泛的 pkill -f 各种写法：拦下', () => {
+  for (const cmd of [
+    'pkill -9f node',
+    'pkill -9 -f "vitest run"',
+    'pkill -KILL -f vitest',
+    'sudo pkill --full chrome',
+    'nohup pkill -lf x',
+    'pkill -u me -f "cargo test"',
+    'sleep 1 && pkill -f -- -weird',
+  ])
+    assert.equal(kindOf(cmd), 'kill-pkill-broad', cmd);
+});
+
+test('不带 -f、模式里有路径或端口或文件名、只是提到 pkill 的命令：不管', () => {
+  for (const cmd of [
+    'kill 12345',
+    // 近 14 天真实记录里按端口、脚本名、路径精确重启自己服务的写法
+    'pkill -f "http.server 8791" ; sleep 0.5; echo done',
+    'pkill -f "wb_server.py --port 8766"',
+    'pkill -f "vite.*--port 5173" 2>/dev/null',
+    'pkill -f "/Users/me/Sandbox/worktrees/x/target/debug/postpane"',
+    'kill %1',
+    'pgrep -fl "/Users/me/Sandbox/worktrees/x/target"',
+    'pkill node',
+    'pkill -u me -t ttys001 node',
+    'pkill -F /w/server.pid',
+    'echo "不要用 pkill -f"',
+    'git commit -m "拦下 pkill -f"',
+    "cat > /w/note.md <<'EOF'\npkill -f 'pnpm test'\nEOF",
+  ])
+    assert.equal(kindOf(cmd), null, cmd);
+});
+
+test('pkill -f 的拒绝说明：讲清为什么、给出 TaskStop 和 pgrep 看清再 kill 的改法', () => {
+  const out = JSON.parse(hookOutput(check("pkill -f 'pnpm test'", ENV)));
+  const reason = out.hookSpecificOutput.permissionDecisionReason;
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(reason, /G-32/);
+  assert.match(reason, /TaskStop/);
+  assert.match(reason, /pgrep -fl/);
+  assert.doesNotMatch(reason, /危险 rm/);
+});
