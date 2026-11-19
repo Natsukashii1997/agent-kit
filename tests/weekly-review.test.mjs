@@ -50,6 +50,18 @@ test('再犯：两种写法都认，按坑汇总并附项目；没有就说明�
   // 部分升级在层级列里显示「部分」（审查 P2-02）
   const part = summarizeRecurrence([{ project: 'a', text: '再犯：G-14' }], { 'G-14': '探针' }, { 'G-14': '体检' }, { 'G-14': '部分升级' }).join('\n');
   assert.match(part, /\| G-14 探针 \| 〔体检〕部分 \| 1 \| a \|/);
+  // 关闭的坑（已被代码消除）不进升级首选，层级列显示「关闭」；又再犯的单列，提示先核实关闭依据
+  const closed = summarizeRecurrence(
+    [{ project: 'a', text: '再犯：G-30、G-09' }],
+    { 'G-30': '已消除', 'G-09': '强调色' },
+    { 'G-30': '提醒', 'G-09': '提醒' },
+    { 'G-30': '关闭', 'G-09': '未升级' },
+  ).join('\n');
+  assert.match(closed, /\| G-30 已消除 \| 〔提醒〕关闭 \| 1 \| a \|/);
+  assert.match(closed, /升级首选.*：G-09。/);
+  assert.ok(!/升级首选.*G-30/.test(closed));
+  assert.match(closed, /已关闭又再犯：G-30。先核实关闭的依据/);
+  assert.ok(!/已关闭又再犯/.test(lv));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-root-'));
   fs.mkdirSync(path.join(root, 'p1', 'docs'), { recursive: true });
   fs.writeFileSync(path.join(root, 'p1', 'docs', 'LESSONS.md'), '再犯：G-01');
@@ -111,6 +123,11 @@ test('等批的提升：按「升级」行认三种写法，跳过已提升、�
     '- 提升：已提升为全局 G-22（2026-11-08，agent-kit#40）。',
     '## L-08 没有升级行的（2026-11-10）',
     '- 现象：x',
+    // 关闭的条目（写法取自 chatgpt-clipper L-03）：后面保留的旧记录里有「未升级」，也不算等批
+    '## L-10 已被代码消除的（2026-11-19）',
+    '- 升级：〔提醒〕关闭（2026-11-19，积压清单组 15）：核实测试按数据类型找下载文件。此前：〔提醒〕未升级。',
+    '## L-11 已被代码消除、层级是结构的（2026-11-19）',
+    '- 升级：〔结构〕关闭（2026-11-19，积压清单组 15）：只留一种做法。此前：未升级，可提议提升为全局坑。',
     '## L-09 没有升级行、但已提升的（2026-10-24）',
     '- 提升：已提升为全局 G-08（2026-10-24）。',
     '## G-01 全局条目（2026-10-24 提升）',
@@ -132,7 +149,7 @@ test('等批的提升：按「升级」行认三种写法，跳过已提升、�
   assert.match(out, /### p（docs\/LESSONS\.md，3 条）\n\n- L-02 bun 编译出的程序在 macOS 上一运行就被杀 〔提议〕\n- L-03 安装时先删旧版\n- L-04 macOS 不区分大小写 〔提议〕/);
   assert.match(out, /### q（LESSONS\.md，1 条）\n\n- L-01 根目录放法/);
   assert.match(out, /没有「升级」行：p 1 条（L-08）/);
-  assert.ok(!/L-0[5679]|G-01|<一句话/.test(out));
+  assert.ok(!/L-0[5679]|L-1[01]|G-01|<一句话/.test(out));
   assert.match(summarizePromotions([]).join('\n'), /等批 0 条，另有 0 条没有「升级」行/);
 });
 
@@ -164,12 +181,15 @@ test('--json：第 3、4 节的机器可读版，升级首选在前，只读不�
     '- 升级：未升级。',
     '## L-04 没有升级行的（2026-11-13）',
     '- 现象：x',
+    '## L-05 已关闭的（2026-11-19）',
+    '- 升级：〔提醒〕关闭（2026-11-19，积压清单组 15）：核实坑已被代码消除。此前：〔提醒〕未升级。',
   ].join('\n'));
   write('b/CURRENT.md', '- 补记：再犯：G-02、G-04\n');
-  write('c/LESSONS.md', '## L-09 又一次（2026-11-14）\n- 再犯：G-02\n- 再犯：G-02\n- 再犯：G-02\n');
+  write('c/LESSONS.md', '## L-09 又一次（2026-11-14）\n- 再犯：G-02\n- 再犯：G-02\n- 再犯：G-02\n- 再犯：G-30\n');
   const lessonsText = [
     '## G-02 时间（2026-10-24 提升）', '- 升级：〔机检〕已升级。',
     '## G-04 并行会话（2026-10-24 提升）', '- 升级：〔文字〕已升级。',
+    '## G-30 已消除（2026-11-19 提升）', '- 升级：〔提醒〕关闭（2026-11-19，示例）：坑已被代码消除。',
   ].join('\n');
   const before = fs.readdirSync(root).sort();
   const j = buildJson({ now: Date.parse('2026-11-18T02:00:00Z'), workRoot: root, lessonsText });
@@ -180,6 +200,8 @@ test('--json：第 3、4 节的机器可读版，升级首选在前，只读不�
   assert.deepEqual(j.recurrences, [
     { id: 'G-04', title: '并行会话', level: '文字', status: '已升级', prime: true, count: 2, projects: ['a', 'b'] },
     { id: 'G-02', title: '时间', level: '机检', status: '已升级', prime: false, count: 4, projects: ['b', 'c'] },
+    // 关闭的坑在〔提醒〕层，但不算升级首选
+    { id: 'G-30', title: '已消除', level: '提醒', status: '关闭', prime: false, count: 1, projects: ['c'] },
   ]);
   assert.deepEqual(j.promotions.map(p => [p.project, p.file, p.id, p.proposed]), [
     ['a', 'docs/LESSONS.md', 'L-01', false],
@@ -201,7 +223,7 @@ test('--json：第 3、4 节的机器可读版，升级首选在前，只读不�
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.equal(out.schema, 1);
-  assert.deepEqual(out.recurrences.map(x => x.id).sort(), ['G-02', 'G-04']);
+  assert.deepEqual(out.recurrences.map(x => x.id).sort(), ['G-02', 'G-04', 'G-30']);
   assert.deepEqual(fs.readdirSync(state), [], '状态目录里什么都没写');
 });
 

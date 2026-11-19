@@ -14,8 +14,9 @@ export const LESSONS_FILE = path.resolve(HERE, '..', 'LESSONS.md');
 // 「升级」一行开头的层级词，从强到弱（LESSONS「怎么升级」，#57）
 export const LEVELS = ['结构', '机检', '体检', '文字', '提醒'];
 
-// 「升级」一行标签后面的状态词；不是这三个开头的都算「已升级」
-const STATUSES = ['未升级', '不升级', '部分升级'];
+// 「升级」一行标签后面的状态词；不是这四个开头的都算「已升级」。
+// 「关闭」：坑本身已被代码消除，不再需要升级（LESSONS「怎么升级」）。
+const STATUSES = ['未升级', '不升级', '部分升级', '关闭'];
 
 // 解析 LESSONS.md：每条 { id, title, line, triggers: [字符串或正则], fix, level: LEVELS 之一或 null, status }
 export function parseLessons(text) {

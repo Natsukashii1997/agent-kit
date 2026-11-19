@@ -23,12 +23,15 @@ test('LESSONS 每条 G-xx 的「升级」一行以层级词开头（#57）', () 
   for (const e of lessons) assert.ok(LEVELS.includes(e.level), `${e.id} 的「- 升级：」要以 ${LEVELS.map(l => `〔${l}〕`).join('')} 之一开头`);
   assert.equal(parseLessons('## G-99 例子\n- 升级：已升级。\n')[0].level, null);
   assert.equal(parseLessons('## G-99 例子\n- 升级：〔机检〕起步骨架。\n')[0].level, '机检');
-  // 状态：未升级 / 不升级 / 部分升级 照词取，其余算已升级；新旧写法都认（审查 P2-01、P2-02）
+  // 状态：未升级 / 不升级 / 部分升级 / 关闭 照词取，其余算已升级；新旧写法都认（审查 P2-01、P2-02）
   const st = s => parseLessons(`## G-99 例子\n- 升级：${s}\n`)[0].status;
   assert.equal(st('〔提醒〕未升级。'), '未升级');
   assert.equal(st('〔提醒〕不升级（常浩确认）'), '不升级');
   assert.equal(st('〔体检〕部分升级：缺一项'), '部分升级');
   assert.equal(st('〔机检〕机器拦截'), '已升级');
+  // 关闭：坑本身已被代码消除，不再需要升级；层级写现在靠什么守住，后面保留的旧记录不影响状态
+  assert.equal(st('〔提醒〕关闭（2026-11-19，积压清单组 15）：核实坑已被代码消除。此前：〔提醒〕未升级。'), '关闭');
+  assert.equal(parseLessons('## G-99 例子\n- 升级：〔结构〕关闭（2026-11-19，积压清单组 15）：只留一种做法。\n')[0].level, '结构');
   assert.equal(st('未升级。'), '未升级');
   assert.equal(lessons.find(e => e.id === 'G-14').status, '部分升级');
 });
