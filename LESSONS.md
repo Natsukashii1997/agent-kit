@@ -633,3 +633,13 @@
 - 出现过的项目：trainee-hub。little-steps 也整包引了 `@fontsource` 字体，是否受影响未核实。
 - 升级：〔提醒〕未升级（2026-11-19，积压清单组 14，常浩批）：只有关键词提醒。〔机检〕候选：起步骨架 `check-rules.mjs` 加一条「import 了 `@fontsource/*.css`」就报；只有一个项目踩过，little-steps 是否受影响没核实，先不做。
 - 触发：`@fontsource`、`@font-face`
+
+## G-45 CLI 明明装了，起子进程却报「未安装」：工作目录不存在也报 ENOENT（2026-11-20 提升）
+
+- 现象：设置页里执行方显示「可用」、`which claude` 也找得到，实际调用却报「Claude 未安装」。
+- 根因：Node 的 `spawn` / `execFile` 在「命令找不到」和「`cwd` 指向的目录不存在」两种情况下都报 `ENOENT`；代码只认 `ENOENT`，就把「工作目录还没建」判成了「没装」。新数据目录、首次运行、目录被清理之后最容易碰上。
+- 正确做法：起子进程前先 `mkdirSync(cwd, { recursive: true })`，或用 `mkdtempSync` 现建目录；「未安装」只用不带 `cwd` 的探测（如 `--version`）判断，调用时碰到 `ENOENT` 先查 `cwd` 在不在，再下结论，报错里写清是哪一种。测试里拿一个不存在的目录当 `cwd`，断言跑完后目录已建好，或报的是「工作目录不存在」。
+- 来源：niuma-home L-22（2026-11-20；证据 `~/Library/Application Support/NiumaHome/evidence/ai-access-20261120/`，项目测试 `tests/ai-access.test.mjs`「Claude 执行方」一项）。
+- 出现过的项目：niuma-home。同样「见 `ENOENT` 就判没装」的写法还有 github-center `src/agent.js:141`（工作目录用 `mkdtempSync` 现建，未踩）、digiworld `server/agent-inventory.mjs:129`（未踩）。
+- 升级：〔提醒〕未升级（2026-11-20，agent-kit#95，常浩批）：只有关键词提醒。〔机检〕做不到：`cwd` 运行时在不在，静态检查判不了；niuma-home 自己的测试只算项目内的〔机检〕。
+- 触发：`/spawn\w*\([^)]*cwd/`、`/ENOENT[^\n]{0,40}(未安装|missing|not.?installed)/`
