@@ -230,3 +230,31 @@ test('cd 解析不出真实目录时照旧用会话目录，强推 main 的守�
   });
 });
 const byDirReal = dir => spawnSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout.trim() || null;
+
+test('跳过钩子的 --no-verify：推送和提交都拦下，写清原因（复盘 P6，2026-11-20 常浩批）', () => {
+  for (const cmd of [
+    'git push --no-verify',
+    'git push --no-verify origin feature',
+    'git push origin feature --no-verify',
+    'git -C ../repo push --no-verify',
+    'cd repo && git push --no-verify -u origin feature',
+    'bash -c "git push --no-verify"',
+    'git commit --no-verify -m "修：x"',
+    'git commit -n -m "修：x"',
+    'git commit -anm "修：x"',
+  ])
+    assert.ok(denied(cmd), cmd);
+  assert.match(decide('git push --no-verify', onBranch('feature')).reason, /--no-verify[\s\S]*跳过[\s\S]*常浩本人/);
+});
+
+test('--no-verify 不该拦的：只是写在提交说明里、push 的 -n（演练）、别的命令', () => {
+  for (const cmd of [
+    'git commit -m "说明里提到 --no-verify"',
+    'git push -n origin feature',
+    'git push --dry-run origin feature',
+    'git log --no-verify',
+    'echo git push --no-verify',
+    'git commit -m x -- --no-verify',
+  ])
+    assert.ok(!denied(cmd), cmd);
+});
