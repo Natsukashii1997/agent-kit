@@ -8,6 +8,7 @@
 // 推送前检查（#76）：推的不是 main/master 的 `git push`、`gh pr create`，如果要推的分支带着本地 main 上
 // 还没推到 origin/main 的提交，就拒绝（2026-10-27 digital-twin 从本地 main 拉 PR 分支，把别的会话没推的提交一起推上了 GitHub）。
 // 只看本机已有的引用、不 fetch；没有 origin/main、分离头指针、不在仓库里、git 出错都不拦。
+// 跳过钩子（复盘 P6，2026-11-20）：git push --no-verify、git commit --no-verify / -n 一律拒绝，钩子是各仓库的必经检查。
 // 出错时不拦（退出码 1，hook 默认放行），只往 stderr 写原因；`node tools/doctor.mjs` 会自检这个 hook。
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -61,6 +62,19 @@ function parsePush(args) {
 }
 
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
+
+// 跳过仓库钩子：git push --no-verify、git commit --no-verify / -n（commit 的 -n 就是 --no-verify；push 的 -n 是演练，不管）。
+// 各仓库的 pre-push、commit-msg 钩子是必经检查（复盘 P6，常浩 2026-11-20 批），一句 --no-verify 就能绕过，所以拦下
+export function skipsHooks(sub, args) {
+  if (sub !== 'push' && sub !== 'commit') return false;
+  for (const a of args) {
+    if (a === '--') break;
+    if (a === '--no-verify') return true;
+    if (sub === 'commit' && /^-[a-zA-Z]+$/.test(a) && a.includes('n')) return true;
+  }
+  return false;
+}
+const NO_VERIFY_REASON = '已拦下：--no-verify 会跳过仓库的提交前、推送前检查（规则检查和测试）。检查不过就修到过；钩子本身有问题就修钩子。确需跳过请常浩本人在终端里操作。';
 
 // gh pr create 开的是哪个分支：--head / -H 写了就用它（owner:branch 取冒号后面），没写就是当前分支
 function prHead(tokens) {
@@ -128,6 +142,7 @@ export function decide(command, { cwd, currentBranch = defaultCurrentBranch, lea
       continue;
     }
     const git = gitArgs(tokens);
+    if (git && skipsHooks(git.sub, git.args)) return { decision: 'deny', reason: NO_VERIFY_REASON };
     if (!git || git.sub !== 'push') continue;
     const where = git.dir ? path.resolve(dirNow || '.', git.dir) : dirNow;
     let here;
