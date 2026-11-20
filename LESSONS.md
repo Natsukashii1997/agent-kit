@@ -249,13 +249,13 @@
 - 现象：同一个智能体框架（Hermes）的两个常驻网关，一个正常回复，另一个（后来新建的 profile）收到飞书消息后一直不回；日志里卡在调用模型接口（chatgpt.com），先是长时间无响应再报 `APITimeoutError` 反复重试。在终端里 `curl` 同一个地址却很快返回，容易误判成模型服务抽风。查进程连接能看到它在连 Facebook / Twitter 的 IP（`2a03:2880:…`、`199.16.156.11`）。2026-11-07 又踩一次：另一个会话执行 `hermes gateway restart` 后，猛鬼兽网关的 plist 被重写、代理丢失，主模型连接超时（`ConnectTimeout`），对话回退到 deepseek-flash；Codex 额度其实充足。
 - 根因：launchd 任务不继承终端 shell 的 `HTTPS_PROXY` 等变量，只认 plist 里 `EnvironmentVariables` 写的。正常那个网关的 plist 是手动加过代理变量的；新 profile 的 plist 由框架自动生成，没有代理变量，于是直连，而系统 DNS 把被墙域名解析成了污染地址。终端里有代理变量，所以手测是好的。另外，`hermes gateway restart/start/install` 和 `hermes update` 每次都会把现有 plist 和 Hermes 模板比对，只忽略 PATH，不一致就整份重写（`hermes_cli/gateway_launchd.py` 的 `refresh_launchd_plist_if_needed`），所以手工加进 plist 的变量一定会被冲掉。
 - 正确做法：
-  - 排查「终端里好、常驻服务里不好」的网络问题，先比两边的环境：`launchctl print gui/<uid>/<label>` 或 `ps eww -p <pid>` 看进程有没有代理变量，`lsof -nP -a -p <pid> -i TCP` 看它实际连到哪个 IP。
+  - 排查「终端里好、常驻服务里不好」的网络问题，先比两边的环境：看服务 plist 的 `EnvironmentVariables` 里有没有代理变量，只列变量名（`/usr/bin/python3 -c 'import plistlib,sys; print(sorted((plistlib.load(open(sys.argv[1],"rb")).get("EnvironmentVariables") or {})))' <plist>`），不用 `ps eww`、`launchctl print` 看进程或服务的环境（会连值一起打出登录令牌，G-42）；`lsof -nP -a -p <pid> -i TCP` 看它实际连到哪个 IP。
   - 需要走代理的 launchd 服务，在 plist 的 `EnvironmentVariables` 里写全大小写两套：`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` 和 `https_proxy`/`http_proxy`/`no_proxy`；国内直连的域名（如 `.feishu.cn`）放进 `NO_PROXY`。改完先 `plutil -lint`，再重装（按 G-18 等 bootout 卸完再 bootstrap）。
   - 框架自动生成或重装 plist（新建 profile、`gateway install` 之类）后，回读一遍代理变量还在不在；同一台机器上多个同类服务的环境变量要对齐。
   - Hermes 网关的代理同时写进对应 profile 的 `.env`（`~/.hermes/.env`、`~/.hermes/profiles/<名>/.env`），以 `.env` 为准：网关启动时会把它读进进程环境并覆盖已有值，plist 被重写也不丢。只想重启进程、不想动 plist 时，用 `launchctl kickstart -k gui/<uid>/<label>`，不用 `hermes gateway restart`。
 - 来源：Hermes 亚古兽网关 2026-11-05（本机服务，没有项目仓库；改前备份 `~/.hermes/backups/ai.hermes.gateway-agumon.plist.bak-20261105`；补代理变量并重启后，那条卡住的消息 4.6 秒回复成功）。
 - 出现过的项目：Hermes 本机网关（踩到 2 次，都已修；第 2 次见 #17，改前备份 `~/.hermes/backups/ai.hermes.gateway.plist.bak-20261107`，`.env` 备份在同一目录）。
-- 升级：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔体检〕部分升级（2026-11-20，复盘提案 P9，#101；digital-twin#249、my-skills#113）：digital-twin 每日巡检 `ops/health_check.py` 每天 09:45 查猛鬼兽、亚古兽两只 Hermes 网关 plist 的 `EnvironmentVariables` 里大小写两套代理变量齐不齐，缺了发飞书，并说明对应 `.env` 有没有兜底；my-skills `automation-checkup` 对配置里 `proxy_labels`（默认 `ai.hermes.gateway*`）列的服务做同样检查。范围：只核对 plist 里的变量名，不读值、不读进程环境（G-42）。缺口：别的要走代理的 launchd 服务要加进 `proxy_labels` 才查；不验证代理本身通不通；`hermes gateway restart` 重写 plist 这个动作本身拦不住，要等第二天巡检才发现。此前：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发：`HTTPS_PROXY`、`https_proxy`、`EnvironmentVariables`、`gateway install`
 
 ## G-20 Mac 睡眠时定时任务照样“在跑”，但慢到被自己的超时或租约强制中断（2026-11-07 新增）
@@ -270,7 +270,7 @@
   - 失败后别只等下一期：这一期漏掉的产出要么补跑，要么在记录里写明不补，避免以为已经有了。
 - 来源：Hermes 本机定时任务 2026-11-02（本机服务，没有项目仓库；`~/.hermes/logs/agent.log` 当天 08:30–09:14 的 API 调用耗时与租约中断记录，`~/.hermes/cron/output/6a976baa2632/2026-11-02_09-14-00.md`，`pmset -g log` 当天 07:00–09:14 的睡眠记录；租约时长见 `hermes-agent/agent/turn_facade_lease.py` 的 `LEASE_TTL_SECONDS = 300`）。agent-kit#31。
 - 出现过的项目：Hermes 本机定时任务。
-- 升级：〔提醒〕未升级。可选去处：本机体检（my-skills 的 automation-checkup）在报定时任务失败时，顺带查失败时段的 `pmset` 睡眠记录，直接说明“当时机器在睡”。
+- 升级：〔体检〕已升级（2026-11-20，复盘提案 P9，#101；digital-twin#249、my-skills#113）：my-skills `automation-checkup` 报 launchd 任务「X 天 / 小时没跑」、Hermes 定时任务失败、过点没跑、晚点 ≥ 10 分钟时，脚本自动读 `pmset -g log`，附那段时间睡着多久、最长一段和维护唤醒次数，睡着占一半以上就把「怎么办」换成睡眠的说法，读不到时写明；digital-twin 每日巡检 `ops/health_check.py` 对两只机器人 `jobs.json` 里最近 24 小时晚点 ≥ 10 分钟或失败的定时任务附同样的记录。范围：本机 launchd 和 Hermes 定时任务；关机期间的仍要 `last shutdown` 人工查。digital-twin 另把唤醒后的网络等待收成共用模块 `netwait`（项目坑 L-03），定时任务开跑前先等代理通。此前：〔提醒〕未升级。
 - 触发：`pmset`、`DarkWake`、`/waiting for model response/`、`/turn lease/`
 
 ## G-21 从程序里跳去本机另一个应用，用 https 链接被默认浏览器在后台接走，目标应用不出来（2026-11-07 提升）
