@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { haystackOf, LESSONS_FILE, LEVELS, matchLessons, parseLessons } from '../hooks/lessons-remind.mjs';
+import { findHits, haystackOf, LESSONS_FILE, LEVELS, matchLessons, parseLessons } from '../hooks/lessons-remind.mjs';
 
 const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
 const ids = haystack => matchLessons(lessons, haystack).map(e => e.id);
@@ -37,10 +37,11 @@ test('LESSONS 每条 G-xx 的「升级」一行以层级词开头（#57）', () 
 });
 
 test('典型命令命中对应的坑', () => {
-  assert.deepEqual(ids('launchctl bootout gui/501/com.x && launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.x.plist').sort(), ['G-05', 'G-18']);
+  // G-05 只在改文件时提醒（瘦身提案 S4），这条 Bash 只中 G-18
+  assert.deepEqual(ids('launchctl bootout gui/501/com.x && launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.x.plist').sort(), ['G-18']);
   assert.ok(ids('/usr/libexec/PlistBuddy -c "Print :x" a.plist').includes('G-06'));
-  assert.ok(ids('codesign --force --sign - ~/Applications/X.app').includes('G-15'));
-  assert.ok(ids('hermes cron incidents').includes('G-14'));
+  assert.ok(ids('cp new.icns ~/Applications/X.app/Contents/Resources/ApplicationIcon.icns').includes('G-15'));
+  assert.ok(ids('hermes cron rm probe-1').includes('G-14'));
   assert.ok(ids('nohup ./wait.sh &').includes('G-12'));
   assert.ok(ids('const t = row.createdAt.slice(0, 16)').includes('G-02'));
   assert.ok(ids("s.replace('T', ' ')").includes('G-02'));
@@ -115,17 +116,100 @@ test('作为 hook 真跑：同一会话同一条只提醒一次，并记一行�
       encoding: 'utf8',
       env: { ...process.env, AGENT_KIT_STATE_DIR: dir },
     });
-  const first = run('launchctl list');
+  const first = run('/usr/libexec/PlistBuddy -c "Print :Label" a.plist');
   assert.equal(first.status, 0);
   const ctx = JSON.parse(first.stdout).hookSpecificOutput;
   assert.equal(ctx.hookEventName, 'PreToolUse');
-  assert.match(ctx.additionalContext, /G-05/);
+  assert.match(ctx.additionalContext, /G-06/);
   assert.equal(ctx.permissionDecision, undefined, '只提醒，不做放行或拦截的决定');
-  const second = run('launchctl print gui/501/x');
+  const second = run('PlistBuddy -c "Print :Program" b.plist');
   assert.equal(second.stdout, '', '同一会话第二次不再提醒');
   const log = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   assert.ok(fs.existsSync(path.join(dir, 'remind-sessions')), '去重记录放在状态目录，不放 /tmp');
   assert.equal(log.length, 2);
   assert.deepEqual(log[1].reminded, []);
+  // M3：日志记下是哪个触发词命中的（瘦身提案 M3），只记触发词本身，不记命令内容
+  assert.deepEqual(log[0].words, { 'G-06': ['PlistBuddy'] });
+  assert.ok(!JSON.stringify(log).includes('Print :Label'));
   assert.equal(run('git status').stdout, '');
+});
+
+// ---------- 瘦身提案（2026-11-20 常浩批 M1、M2、M5、S1～S6、S8） ----------
+
+const sample = parseLessons([
+  '## G-98 例子',
+  '- 触发（改文件）：`editonly`',
+  '- 触发（主目录）：`mainonly`',
+  '- 触发：`anywhere`',
+  '- 升级：〔提醒〕未升级',
+  '## G-97 并入的例子',
+  '- 触发：无（已并入 G-98）',
+  '- 升级：〔提醒〕并入 G-98（2026-11-20，瘦身提案）。此前：〔提醒〕未升级。',
+].join('\n'));
+const hitIds = (input, entries = sample) => findHits(entries, input).map(h => h.entry.id);
+const bash = (command, cwd = '/w/repo') => ({ tool_name: 'Bash', cwd, tool_input: { command } });
+const write = (file_path, content, cwd = '/w/repo') => ({ tool_name: 'Write', cwd, tool_input: { file_path, content } });
+
+test('触发行可以限定范围：「改文件」只在写文件时匹配（M1）', () => {
+  assert.deepEqual(hitIds(bash('run editonly')), []);
+  assert.deepEqual(hitIds(write('/w/repo/a.sh', 'editonly')), ['G-98']);
+  for (const tool of ['Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch'])
+    assert.deepEqual(hitIds({ tool_name: tool, cwd: '/w/repo', tool_input: { file_path: '/w/repo/a.sh', new_string: 'editonly' } }), ['G-98'], tool);
+});
+
+test('「主目录」只在不是 worktree 的目录匹配（M2）', () => {
+  assert.deepEqual(hitIds(bash('mainonly', '/w/repo')), ['G-98']);
+  assert.deepEqual(hitIds(bash('mainonly', '/w/repo/.claude/worktrees/x')), []);
+  assert.deepEqual(hitIds(bash('mainonly', '/Users/n/Sandbox/worktrees/repo-x')), []);
+  assert.deepEqual(hitIds(bash('anywhere', '/w/repo/.claude/worktrees/x')), ['G-98'], '没限定范围的照常匹配');
+});
+
+test('改 .md 文件不匹配（M5）；代码文件、apply_patch 里混着代码文件照常匹配', () => {
+  assert.deepEqual(hitIds(write('/w/repo/docs/x.md', 'anywhere editonly')), []);
+  assert.deepEqual(hitIds(write('/w/repo/x.mjs', 'anywhere')), ['G-98']);
+  const patch = files => ({ tool_name: 'apply_patch', cwd: '/w/repo', tool_input: { command: `*** Begin Patch\n${files.map(f => `*** Update File: ${f}\n+anywhere`).join('\n')}\n*** End Patch` } });
+  assert.deepEqual(hitIds(patch(['docs/a.md'])), []);
+  assert.deepEqual(hitIds(patch(['docs/a.md', 'src/b.js'])), ['G-98']);
+  assert.deepEqual(hitIds(bash('cat README.md | grep anywhere')), ['G-98'], 'Bash 命令不看文件后缀');
+});
+
+test('命中结果带上是哪个触发词（M3）', () => {
+  const h = findHits(sample, bash('anywhere mainonly'));
+  assert.deepEqual(h.map(x => x.words), [['mainonly', 'anywhere']]);
+});
+
+test('「并入」的条目：状态是并入，记下并到哪条，没有触发词', () => {
+  const merged = sample.find(e => e.id === 'G-97');
+  assert.equal(merged.status, '并入');
+  assert.equal(merged.mergedInto, 'G-98');
+  assert.deepEqual(merged.triggers, []);
+});
+
+test('真实 LESSONS 按瘦身提案调整后的效果', () => {
+  const real = input => findHits(lessons, input).map(h => h.entry.id);
+  // S1 G-03：跑脚本不提醒，改脚本提醒
+  assert.ok(!real(bash('python3 -B hermes/scripts/health_check.py')).includes('G-03'));
+  assert.ok(real(write('/w/repo/scripts/release.sh', 'echo hi')).includes('G-03'));
+  // S2 G-10：飞书不再触发
+  assert.ok(!real(bash('lark-cli feishu docs +fetch x')).includes('G-10'));
+  // S3 G-04：worktree 里 git add -A 不提醒，主目录提醒；并进来的 CARGO_TARGET_DIR 在 worktree 里也提醒
+  assert.ok(!real(bash('git add -A', '/w/repo/.claude/worktrees/x')).includes('G-04'));
+  assert.ok(real(bash('git add -A', '/w/repo')).includes('G-04'));
+  assert.ok(real(bash('CARGO_TARGET_DIR=/w/target cargo test', '/w/repo/.claude/worktrees/x')).includes('G-04'));
+  // S4 G-05：查看 launchd 不提醒，写 plist 提醒
+  assert.ok(!real(bash('launchctl list | grep hermes')).includes('G-05'));
+  assert.ok(real(write('/Users/n/Library/LaunchAgents/com.x.plist', '<plist/>')).includes('G-05'));
+  // S5 G-15：正常打包签名不提醒；并进来的缓存头照常提醒
+  assert.ok(!real(bash('codesign --force --sign - build/Postpane.app')).includes('G-15'));
+  assert.ok(real(write('/w/repo/server.mjs', "res.setHeader('Cache-Control', 'no-cache')")).includes('G-15'));
+  // S8 G-14：只认删除类子命令
+  assert.ok(!real(bash('hermes cron list')).includes('G-14'));
+  for (const sub of ['remove', 'rm', 'delete']) assert.ok(real(bash(`hermes cron ${sub} probe-1`)).includes('G-14'), sub);
+  // S3、S5、S6：被并入的编号还在，状态是并入，指向合并后的条目
+  for (const [from, to] of [['G-23', 'G-04'], ['G-16', 'G-15'], ['G-47', 'G-46']]) {
+    const e = lessons.find(x => x.id === from);
+    assert.equal(e.status, '并入', from);
+    assert.equal(e.mergedInto, to, from);
+  }
+  assert.ok(real(bash('git -C repo config core.hooksPath scripts/hooks')).includes('G-46'), 'G-47 的触发词并进 G-46');
 });

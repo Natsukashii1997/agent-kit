@@ -192,8 +192,9 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   const problems = [];
   const g = run('guard-git.mjs', { tool_name: 'Bash', tool_input: { command: 'git push --force origin main' } });
   if (g.status !== 0 || !String(g.stdout).includes('"deny"')) problems.push(`guard-git 没拦下强推 main（退出码 ${g.status}，${g.stderr || g.stdout}）`);
-  const r = run('lessons-remind.mjs', { session_id: 'selftest', tool_name: 'Bash', tool_input: { command: 'launchctl bootstrap gui/501 x.plist' } });
-  if (r.status !== 0 || !String(r.stdout).includes('G-05')) problems.push(`lessons-remind 没对 launchctl 给出 G-05 提醒（退出码 ${r.status}，${r.stderr || r.stdout}）`);
+  // G-05 只在改文件时提醒（瘦身提案 S4），自检用「写一份 LaunchAgents 里的 plist」
+  const r = run('lessons-remind.mjs', { session_id: 'selftest', tool_name: 'Write', tool_input: { file_path: '/x/Library/LaunchAgents/com.agent-kit.selftest.plist', content: '<plist/>' } });
+  if (r.status !== 0 || !String(r.stdout).includes('G-05')) problems.push(`lessons-remind 没对写 plist 给出 G-05 提醒（退出码 ${r.status}，${r.stderr || r.stdout}）`);
   const s = run('skill-usage.mjs', { session_id: 'selftest', tool_name: 'Skill', tool_input: { skill: 'selftest' } });
   if (s.status !== 0) problems.push(`skill-usage 跑不起来（退出码 ${s.status}，${s.stderr || s.stdout}）`);
   const t = run('thinking-review-nudge.mjs', { session_id: 'selftest', hook_event_name: 'UserPromptSubmit', prompt: '这个思维评审一下' });
@@ -275,7 +276,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通，上下文提醒钩子对 60% 的会话给出了提醒。');
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对写 plist 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通，上下文提醒钩子对 60% 的会话给出了提醒。');
     plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
