@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isEntry, parseJson, readStdin, splitCommands, stripWrappers, tokenize } from './lib/common.mjs';
+import { isEntry, parseJson, readStdin, segments, splitHeredocs, stripWrappers, tokenize } from './lib/common.mjs';
 
 const PROTECTED = new Set(['main', 'master']);
 const isProtected = ref => PROTECTED.has(String(ref).replace(/^refs\/heads\//, ''));
@@ -62,6 +62,12 @@ function parsePush(args) {
 }
 
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash']);
+// 这一段是不是从标准输入读命令的 shell（bash、sh -s；bash -c "…" 读的是参数，不算）
+const REDIRECT = /\d*(?:<<-?|<<<|>>|<|>)&?[ \t]*(?:'[^']*'|"[^"]*"|[^\s<>]+)/g;
+const feedsShell = seg => {
+  const t = stripWrappers(tokenize(seg.replace(REDIRECT, ' ')));
+  return t.length > 0 && SHELLS.has(path.basename(t[0])) && !t.slice(1).some(a => /^-[a-z]*c[a-z]*$/.test(a)) && !t.slice(1).some(a => !a.startsWith('-'));
+};
 
 // 跳过仓库钩子：git push --no-verify、git commit --no-verify / -n（commit 的 -n 就是 --no-verify；push 的 -n 是演练，不管）。
 // 各仓库的 pre-push、commit-msg 钩子是必经检查（复盘 P6，常浩 2026-11-20 批），一句 --no-verify 就能绕过，所以拦下
@@ -117,8 +123,17 @@ function leakReason(verb, src, leak) {
 // 返回 { decision: 'deny', reason } 或 null（不管）。deny：强推或删除 main/master；推送会带出本地 main 没推的提交（#76）。
 // currentBranch(dir) 用来判断没写分支名、或写 HEAD 时推的是哪个分支；leakedCommits(dir, src) 查 src 带着本地 main 的哪些没推的提交。
 export function decide(command, { cwd, currentBranch = defaultCurrentBranch, leakedCommits = defaultLeakedCommits, depth = 0 } = {}) {
+  // 只看真正会执行的命令（挂起 8，2026-11-20）：heredoc 正文、引号里的提交说明和 PR 正文是文本，
+  // 里面写着 git push -f 也不拦。heredoc 喂给 shell 的（cat <<EOF | bash、bash <<EOF）正文就是命令，照样判断。
+  const { text, bodies } = splitHeredocs(command);
+  if (depth < 3)
+    for (const { opener, body } of bodies) {
+      if (!segments(opener).some(feedsShell)) continue;
+      const inner = decide(body, { cwd, currentBranch, leakedCommits, depth: depth + 1 });
+      if (inner) return inner;
+    }
   let dirNow = cwd;
-  for (const segment of splitCommands(command)) {
+  for (const segment of segments(text)) {
     const tokens = stripWrappers(tokenize(segment));
     const cdTo = cdTarget(tokens, dirNow);
     if (cdTo !== undefined) {

@@ -115,8 +115,7 @@ test('重现 2026-10-27：本地 main 领先 origin/main 3 个提交，从它拉
     assert.ok(!r.reason.includes('分支自己的提交'), '只列本地 main 上没推的，不列分支自己的');
     assert.match(r.reason, /git switch -c <新分支> origin\/main/);
     assert.match(r.reason, /先推 main（《工程流程》第 5 节第 1 步）/);
-    // 各种写法都认：git -C、参数乱序、cd 进去再推、不写分支名、写 HEAD、换个远端分支名、bash -c、gh pr create。
-    // 认不出：bash -c "cd 别处 && git push"（公共分词先按 && 切开，引号不起作用，见 docs/机器执行层.md「已知漏洞」）
+    // 各种写法都认：git -C、参数乱序、cd 进去再推、不写分支名、写 HEAD、换个远端分支名、bash -c（含里面先 cd）、gh pr create。
     for (const [cmd, cwd] of [
       [`git -C ${work} push origin claude/probe`, root],
       [`git -C work push origin claude/probe`, root],
@@ -130,6 +129,7 @@ test('重现 2026-10-27：本地 main 领先 origin/main 3 个提交，从它拉
       ['git push origin main:claude/other', work],
       ['git push --force-with-lease origin claude/probe', work],
       [`bash -c "git -C ${work} push -u origin claude/probe"`, root],
+      [`bash -c "cd ${work} && git push"`, root],
       ['gh pr create --fill', work],
       ['gh pr create --base main --head claude/probe --title x', work],
       ['gh pr create -H someone:claude/probe', work],
@@ -257,4 +257,37 @@ test('--no-verify 不该拦的：只是写在提交说明里、push 的 -n（演
     'git commit -m x -- --no-verify',
   ])
     assert.ok(!denied(cmd), cmd);
+});
+
+// ---------- 只拦真实执行的命令（挂起 8，2026-11-20）：引号、heredoc 正文里的字样是文本，不是命令 ----------
+
+test('强推、--no-verify 字样只出现在提交说明、PR 正文、heredoc、echo 里：不拦', () => {
+  for (const cmd of [
+    'git commit -m "修 guard; git push -f origin main 不再误拦"',
+    'git commit -m "第一行\n\ngit push --force origin main\ngit push origin :master"',
+    "git commit -m \"$(cat <<'EOF'\n修 guard 误拦\n\ngit push -f origin main\ngit push --no-verify\nEOF\n)\"",
+    "cat > notes.md <<'EOF'\ngit push --force origin main\nEOF",
+    'cat <<EOF > notes.md\n  git push -f origin master && git push origin --delete main\nEOF',
+    "cat <<-'EOF' > notes.md\n\tgit push -f origin main\n\tEOF",
+    'gh pr create --title x --body "例子：git push -f origin main && git push origin :main"',
+    'echo "a && git push -f origin master"',
+    "printf '%s\\n' 'git push -f origin main; git commit -n' | tee x.txt",
+    'git commit -m "说明里写了 git push --no-verify；不是真跳过"',
+  ])
+    assert.ok(!denied(cmd, onBranch('main')), cmd);
+});
+
+test('真实执行的强推、--no-verify：照样拦（和文本混在一条命令里、heredoc 喂给 shell、bash -c 里 cd 再推）', () => {
+  for (const cmd of [
+    'git commit -m "修复；随后强推" && git push -f origin main',
+    'git commit -m "a; b" ; git push --force origin main',
+    "cat > notes.md <<'EOF'\n只是文本\nEOF\ngit push -f origin main",
+    "cat <<'EOF' | bash\ngit push -f origin main\nEOF",
+    "bash <<'EOF'\ncd repo\ngit push --force origin master\nEOF",
+    "sh -s <<EOF\ngit push origin --delete main\nEOF",
+    'bash -c "cd /no/such/dir && git push -f origin main"',
+    'git commit -m "提到 git push" --no-verify',
+    'git add -A && git commit -m "$(printf x)" -n',
+  ])
+    assert.ok(denied(cmd, onBranch('feature')), cmd);
 });

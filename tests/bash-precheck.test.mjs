@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { check, hookOutput, run, segments, stripHeredocBodies } from '../hooks/bash-precheck.mjs';
+import { check, hookOutput, run } from '../hooks/bash-precheck.mjs';
+import { segments, splitHeredocs, stripHeredocBodies } from '../hooks/lib/common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOOK = path.join(HERE, '..', 'hooks', 'bash-precheck.mjs');
@@ -98,6 +99,10 @@ test('分段：引号、$( )、${ } 里的分隔符不切；2>&1 不算分隔符
 test('heredoc 正文不当命令看', () => {
   assert.equal(stripHeredocBodies("cat > a <<'EOF'\nrm -rf $X/*\nEOF\necho ok"), "cat > a <<'EOF'\necho ok");
   assert.equal(stripHeredocBodies('cat <<-END\n\trm x\n\tEND\nls'), 'cat <<-END\nls');
+  // <<< 是 here-string，后面几行还是命令（原来会被当成 heredoc 正文吞掉，2026-11-20）
+  assert.equal(stripHeredocBodies('cat <<<EOF\nrm -rf $X/*'), 'cat <<<EOF\nrm -rf $X/*');
+  // 正文连同开头那一行一起交回，调用方可以判断是不是喂给 shell 的
+  assert.deepEqual(splitHeredocs("cat <<'A' | bash\ngit push\nA\nls").bodies, [{ opener: "cat <<'A' | bash", body: 'git push' }]);
 });
 
 test('拒绝说明：写明类别、命中的写法和怎么改', () => {
