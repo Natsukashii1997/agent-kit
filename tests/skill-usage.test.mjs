@@ -41,8 +41,9 @@ test('装进 PostToolUse：只给 Claude；重复安装不叠加；卸载只去�
   const once = mergeHooks(start, ourPostGroups('claude', '/n', '/kit'), { event: 'PostToolUse' });
   const twice = mergeHooks(once, ourPostGroups('claude', '/n', '/kit'), { event: 'PostToolUse' });
   assert.deepEqual(once, twice);
-  assert.equal(once.hooks.PostToolUse.length, 2);
+  assert.equal(once.hooks.PostToolUse.length, 3, '别人的、skill-usage、上下文提醒（#105）');
   assert.equal(once.hooks.PostToolUse[1].matcher, 'Skill');
+  assert.equal(once.hooks.PostToolUse[2].matcher, undefined, '上下文提醒每次工具调用后都跑');
   assert.deepEqual(once.hooks.PreToolUse, start.hooks.PreToolUse);
   const removed = mergeHooks(once, [], { remove: true, event: 'PostToolUse' });
   assert.deepEqual(removed, start);
