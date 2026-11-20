@@ -57,7 +57,7 @@
 - 正确做法：改 `scripts/` 下任何脚本也跑全量测试；有测试截取脚本执行的，新增外部命令时在测试里补桩和断言。
 - 来源：work-desk L-06（提交 `b5c212d` 引入，修复是测试里补的桩）。
 - 出现过的项目：work-desk。
-- 升级：〔机检〕部分升级（2026-11-20，瘦身提案 S1，常浩批）：推送前钩子跑测试的 8 个仓库（chatgpt-clipper、disk-slim、get-index、little-steps、multi-agent、obsidian-kb、postpane、ui-system；复盘 P6），加上 main 要求 CI `test` 通过才能合并的 6 个仓库（agent-kit、my-skills、digital-twin、digiworld、github-center、niuma-home），改了脚本不跑测试就推不上去或合不进去。不覆盖：没有钩子也没有必需检查的仓库（如 agent-autoloop）、仓库外的脚本（如 `~/.hermes` 下的）、推送前只跑快测试的那部分（postpane 的 `pnpm test`、chatgpt-clipper 的 snapshot，靠合并前手动跑全量）、纯文档直推 main（《工程流程》第 3 节）。提醒改成只在改文件时出现（跑脚本不提醒）。全局指令里那一句缩不缩成指针，另走改动确认。此前：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
+- 升级：〔机检〕部分升级（2026-11-20，瘦身提案 S1，常浩批）：推送前钩子跑测试的 8 个仓库（chatgpt-clipper、disk-slim、get-index、little-steps、multi-agent、obsidian-kb、postpane、ui-system；复盘 P6），加上 main 要求 CI `test` 通过才能合并的 6 个仓库（agent-kit、my-skills、digital-twin、digiworld、github-center、niuma-home），改了脚本不跑测试就推不上去或合不进去。不覆盖：没有钩子也没有必需检查的仓库（如 agent-autoloop）、仓库外的脚本（如 `~/.hermes` 下的）、推送前只跑快测试的那部分（postpane 的 `pnpm test`、chatgpt-clipper 的 snapshot，靠合并前手动跑全量）、纯文档直推 main（《工程流程》第 3 节）。提醒改成只在改文件时出现（跑脚本不提醒）。全局指令里那一句不缩成指针（常浩 2026-11-20 回改动确认「不改」）：机检管不到的地方仍只靠它。此前：〔文字〕已升级（2026-11-07，#15）：全局指令「跨项目沉淀」的「全局坑硬约束」一句（`~/.claude/CLAUDE.md` 与 `~/.codex/AGENTS.md` 同一句，仓库版在 `global/`）。
 - 触发（改文件）：`/scripts\/[^\s]+\.(sh|mjs|js|py)/`
 
 ## G-04 并行会话共用一个工作区或构建目录，测试互相污染、提交带上别人的改动（2026-10-24 提升，2026-11-20 并入 G-23）
