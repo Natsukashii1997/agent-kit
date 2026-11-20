@@ -1,0 +1,4 @@
+{
+  "context_window": 1000000,
+  "thresholds": [0.5, 0.7]
+}

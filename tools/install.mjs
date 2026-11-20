@@ -6,9 +6,11 @@
 //   --only claude | --only codex      只装一边
 //   --allow-any-branch                允许不在 main 上装（只给测试和有意为之时用）
 // 改的文件：~/.claude/settings.json（permissions.deny / ask、hooks.PreToolUse、hooks.PostToolUse 里的 skill-usage、
-//          hooks.UserPromptSubmit 里的 thinking-review-nudge 和首轮整理、hooks.SessionStart 里的首轮整理）、
+//          hooks.UserPromptSubmit 里的 thinking-review-nudge、首轮整理和上下文提醒、hooks.PostToolUse 里的上下文提醒、
+//          hooks.SessionStart 里的首轮整理）、
 //          ~/.codex/hooks.json（hooks.PreToolUse）、~/.codex/rules/agent-kit.rules。
 // 首轮整理钩子（#65）的真实配置放状态目录 session-organize-once/config.json，不进仓库；没有时从旧位置迁移或拷示例，已有的不覆盖。
+// 上下文提醒钩子（#105）同样：配置和提醒记录放状态目录 context-handoff/，没有时从 ~/.claude/hooks/context-handoff/ 迁移。
 // 写之前把原文件备份到状态目录 backups/<时间>/；hook 脚本和 LESSONS.md 复制到状态目录 runtime/ 再指向那里，
 // 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
 // 本次新增了哪些权限规则记在状态目录 install-manifest.json，卸载只删这些，你自己原有的同名规则不动。
@@ -21,11 +23,13 @@ import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORGANIZE = 'session-organize-once/session_organize_once.py';
-// 旧路径 ~/.claude/hooks/session-organize-once/… 也带「hooks/session-organize-once/…」，重装时会被认出来换掉
-const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs', ORGANIZE];
+const HANDOFF = 'context-handoff/context_handoff.py';
+// 旧路径 ~/.claude/hooks/session-organize-once/…、~/.claude/hooks/context-handoff/… 也带「hooks/<同名>/…」，重装时会被认出来换掉
+const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs', ORGANIZE, HANDOFF];
 const TIMEOUT_SEC = 10;
 const ORGANIZE_TIMEOUT_SEC = 5;
 export const ORGANIZE_LEGACY_DIR = home => path.join(home, '.claude', 'hooks', 'session-organize-once');
+export const HANDOFF_LEGACY_DIR = home => path.join(home, '.claude', 'hooks', 'context-handoff');
 
 export const isOurHook = h => typeof h?.command === 'string' && HOOK_FILES.some(f => h.command.includes(`hooks/${f}`));
 
@@ -42,6 +46,15 @@ export function organizeCommand(python, base) {
 }
 
 const organizeHook = (python, base) => ({ type: 'command', command: organizeCommand(python, base), timeout: ORGANIZE_TIMEOUT_SEC, statusMessage: '整理新会话' });
+
+// 上下文提醒钩子（#105）的命令：同上，配置和提醒记录在状态目录 context-handoff/
+export function handoffCommand(python, base) {
+  const dir = path.join(path.dirname(base), 'context-handoff');
+  return `"${python}" "${path.join(base, 'hooks', HANDOFF)}" --config "${path.join(dir, 'config.json')}" --state-dir "${path.join(dir, 'state')}"`;
+}
+
+// 发消息时显示「检查上下文用量」；工具调用后每次都跑，不显示，免得刷屏
+const handoffHook = (python, base, statusMessage) => ({ type: 'command', command: handoffCommand(python, base), timeout: ORGANIZE_TIMEOUT_SEC, ...(statusMessage ? { statusMessage } : {}) });
 
 // 新会话启动时的 hook（SessionStart）：只有 Claude 桌面应用的首轮整理（#65）
 export function ourStartGroups(tool, python = stablePython(), base = KIT) {
@@ -60,6 +73,34 @@ export function ensureOrganizeConfig(sd, home, { write = false, kit = KIT } = {}
     fs.copyFileSync(src, dest);
   }
   return src === legacy ? `首轮整理配置从旧位置 ${legacy} 迁移到 ${dest}` : `首轮整理配置还没有，拷示例到 ${dest}（分区和项目要按本机改）`;
+}
+
+// 上下文提醒的配置和提醒记录：配置已有就不动，没有就从旧位置迁移或拷示例；
+// 旧位置的提醒记录一并拷过来（已有的同名记录不覆盖），已经提醒过的会话不会再提醒一次。旧目录不删
+export function ensureHandoffConfig(sd, home, { write = false, kit = KIT } = {}) {
+  const dir = path.join(sd, 'context-handoff');
+  const dest = path.join(dir, 'config.json');
+  const legacy = HANDOFF_LEGACY_DIR(home);
+  const legacyState = path.join(legacy, 'state');
+  const marks = fs.existsSync(legacyState) ? fs.readdirSync(legacyState).filter(f => f.endsWith('.json') && !fs.existsSync(path.join(dir, 'state', f))) : [];
+  const notes = [];
+  if (fs.existsSync(dest)) notes.push(`上下文提醒配置已在 ${dest}，不动`);
+  else {
+    const src = fs.existsSync(path.join(legacy, 'config.json')) ? path.join(legacy, 'config.json') : path.join(kit, 'config', 'context-handoff.example.json');
+    if (write) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+    notes.push(src.startsWith(legacy) ? `上下文提醒配置从旧位置 ${legacy} 迁移到 ${dest}` : `上下文提醒配置还没有，拷示例到 ${dest}`);
+  }
+  if (marks.length) {
+    if (write) {
+      fs.mkdirSync(path.join(dir, 'state'), { recursive: true });
+      for (const f of marks) fs.copyFileSync(path.join(legacyState, f), path.join(dir, 'state', f));
+    }
+    notes.push(`旧位置的 ${marks.length} 条提醒记录拷过来`);
+  }
+  return notes.join('；');
 }
 
 // Homebrew 的 node 真实路径带版本号（/opt/homebrew/Cellar/node/<版本>/bin/node），升级后旧路径会消失、hook 就静默失效；
@@ -83,19 +124,24 @@ export function ourHookGroups(tool, node = stableNode(), base = KIT) {
   ];
 }
 
-// 用户发消息时的 hook（UserPromptSubmit）：只有 Claude 的 thinking-review 准入提醒（#35）和首轮整理（#65）
+// 用户发消息时的 hook（UserPromptSubmit）：只有 Claude 的 thinking-review 准入提醒（#35）、首轮整理（#65）和上下文提醒（#105）
 export function ourPromptGroups(tool, node = stableNode(), base = KIT, python = stablePython()) {
   if (tool !== 'claude') return [];
   return [
     { hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'thinking-review-nudge.mjs')}"`, timeout: TIMEOUT_SEC }] },
     { hooks: [organizeHook(python, base)] },
+    { hooks: [handoffHook(python, base, '检查上下文用量')] },
   ];
 }
 
-// 调用后记账的 hook（PostToolUse）：目前只有 Claude 的 skill 调用日志；Codex 没有 Skill 工具，由 my-skills 月度体检读会话记录补
-export function ourPostGroups(tool, node = stableNode(), base = KIT) {
+// 调用后的 hook（PostToolUse）：Claude 的 skill 调用日志（Codex 没有 Skill 工具，由 my-skills 月度体检读会话记录补），
+// 和上下文提醒（#105，长时间自主运行的一轮里也能及时提醒）
+export function ourPostGroups(tool, node = stableNode(), base = KIT, python = stablePython()) {
   if (tool !== 'claude') return [];
-  return [{ matcher: 'Skill', hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'skill-usage.mjs')}"`, timeout: TIMEOUT_SEC }] }];
+  return [
+    { matcher: 'Skill', hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'skill-usage.mjs')}"`, timeout: TIMEOUT_SEC }] },
+    { hooks: [handoffHook(python, base)] },
+  ];
 }
 
 // 去掉某个事件下已有的 agent-kit hook（别人的 hook 原样保留），再按需加上新的
@@ -166,6 +212,17 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   });
   fs.rmSync(tmp, { recursive: true, force: true });
   if (o.status !== 0 || String(o.stdout).trim() !== '{}') problems.push(`首轮整理钩子跑不起来（${python}，退出码 ${o.status}，${o.stderr || o.stdout}）`);
+  // 上下文提醒（#105）：用示例配置和一份越过 50% 的会话记录跑一次，应给出提醒
+  const ht = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-handoff-'));
+  const transcript = path.join(ht, 't.jsonl');
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 600000 } } })}\n`);
+  const h = spawnSync(python, ['-B', path.join(base, 'hooks', HANDOFF), '--config', path.join(base, 'config', 'context-handoff.example.json'), '--state-dir', path.join(ht, 'state')], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'selftest', transcript_path: transcript }),
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+  fs.rmSync(ht, { recursive: true, force: true });
+  if (h.status !== 0 || !String(h.stdout).includes('上下文提醒')) problems.push(`上下文提醒钩子没对 60% 的会话给出提醒（${python}，退出码 ${h.status}，${h.stderr || h.stdout}）`);
   return problems;
 }
 
@@ -218,7 +275,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通。');
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对 launchctl 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通，上下文提醒钩子对 60% 的会话给出了提醒。');
     plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
   }
 
@@ -242,18 +299,18 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       }
     }
     after = mergeHooks(after, ourHookGroups('claude', stableNode(), runtime), { remove });
-    after = mergeHooks(after, ourPostGroups('claude', stableNode(), runtime), { remove, event: 'PostToolUse' });
+    after = mergeHooks(after, ourPostGroups('claude', stableNode(), runtime, stablePython()), { remove, event: 'PostToolUse' });
     after = mergeHooks(after, ourPromptGroups('claude', stableNode(), runtime), { remove, event: 'UserPromptSubmit' });
     after = mergeHooks(after, ourStartGroups('claude', stablePython(), runtime), { remove, event: 'SessionStart' });
     plan.push(`Claude Code：${file}`);
-    if (!remove) plan.push(`  ${ensureOrganizeConfig(sd, home)}`);
+    if (!remove) plan.push(`  ${ensureOrganizeConfig(sd, home)}`, `  ${ensureHandoffConfig(sd, home)}`);
     if (remove) {
-      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 8 组 hook；你原有的同名规则不动；首轮整理配置留在状态目录` : '  找不到安装记录，权限规则不动（只去掉 8 组 hook）');
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 10 组 hook；你原有的同名规则不动；首轮整理、上下文提醒的配置和记录留在状态目录` : '  找不到安装记录，权限规则不动（只去掉 10 组 hook）');
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
       const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage，hooks.UserPromptSubmit 放入 thinking-review-nudge 和首轮整理，hooks.SessionStart 放入首轮整理（旧的 agent-kit hook 和 ~/.claude/hooks 下的旧首轮整理先去掉）`);
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage 和上下文提醒，hooks.UserPromptSubmit 放入 thinking-review-nudge、首轮整理和上下文提醒，hooks.SessionStart 放入首轮整理（旧的 agent-kit hook 和 ~/.claude/hooks 下的旧首轮整理、旧上下文提醒先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
@@ -306,7 +363,10 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     if (nextManifest.claude) fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
     else fs.rmSync(manifestFile, { force: true });
   } else {
-    if (doClaude) ensureOrganizeConfig(sd, home, { write: true });
+    if (doClaude) {
+      ensureOrganizeConfig(sd, home, { write: true });
+      ensureHandoffConfig(sd, home, { write: true });
+    }
     copyRuntime(runtime);
     nextManifest.kit = KIT;
     nextManifest.installedAt = new Date().toISOString();

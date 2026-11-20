@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -84,7 +84,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.equal(after.hooks.PreToolUse[2].matcher, 'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode');
   assert.equal(after.hooks.PreToolUse[3].matcher, 'Bash');
   assert.ok(after.hooks.PreToolUse[3].hooks[0].command.endsWith('bash-precheck.mjs"'));
-  assert.equal(after.hooks.UserPromptSubmit.length, 2, 'thinking-review-nudge 和首轮整理');
+  assert.equal(after.hooks.UserPromptSubmit.length, 3, 'thinking-review-nudge、首轮整理和上下文提醒');
   assert.ok(after.hooks.UserPromptSubmit[0].hooks[0].command.endsWith('thinking-review-nudge.mjs"'));
   // 首轮整理（#65）：两处都指向 runtime 副本，配置和运行记录在状态目录
   const organizeDir = path.join(state, 'session-organize-once');
@@ -125,6 +125,19 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   const organized = runOrganize({ hook_event_name: 'UserPromptSubmit', session_id: 'org-1', prompt_id: 'p-1', cwd: home, prompt: '做点事' });
   assert.match(organized.stdout, /additionalContext/);
   assert.match(fs.readFileSync(path.join(organizeDir, 'state', 'decisions.log'), 'utf8'), /armed[\s\S]*dispatched/);
+  // 上下文提醒（#105）：发消息和工具调用后两处同一条命令，指向 runtime 副本；照设置里的命令原样跑，越过 50% 给提醒
+  const handoffDir = path.join(state, 'context-handoff');
+  const [promptHandoff] = after.hooks.UserPromptSubmit[2].hooks;
+  assert.ok(promptHandoff.command.endsWith(`"${path.join(state, 'runtime', 'hooks', 'context-handoff', 'context_handoff.py')}" --config "${path.join(handoffDir, 'config.json')}" --state-dir "${path.join(handoffDir, 'state')}"`), promptHandoff.command);
+  assert.equal(promptHandoff.statusMessage, '检查上下文用量');
+  const postHandoff = after.hooks.PostToolUse.at(-1).hooks[0];
+  assert.equal(postHandoff.command, promptHandoff.command);
+  assert.equal(postHandoff.statusMessage, undefined, '工具调用后不显示状态，免得刷屏');
+  const transcript = path.join(home, 't.jsonl');
+  fs.writeFileSync(transcript, `${JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 600000 } } })}\n`);
+  const reminded = spawnSync('/bin/sh', ['-c', postHandoff.command], { input: JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 'h-1', transcript_path: transcript }), encoding: 'utf8' });
+  assert.match(reminded.stdout, /交接卡是唯一的开始入口/);
+  assert.equal(fs.readdirSync(path.join(handoffDir, 'state')).length, 1, '提醒记录写在状态目录');
 
   assert.equal(quiet(() => main(args(['--apply']), home, env)), 0, '重复安装');
   assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), after, '重复安装不改设置');
@@ -132,6 +145,7 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.equal(quiet(() => main(['--uninstall', '--apply'], home, env)), 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(settings, 'utf8')), original, '卸载后原有的同名规则还在，SessionStart 和 UserPromptSubmit 也一并去掉');
   assert.ok(fs.existsSync(path.join(organizeDir, 'config.json')), '卸载不删首轮整理配置');
+  assert.ok(fs.existsSync(path.join(handoffDir, 'config.json')), '卸载不删上下文提醒配置');
   assert.ok(!fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
   assert.deepEqual(fs.readdirSync(path.join(home, '.codex', 'rules')), [], '规则目录里不留备份');
   assert.ok(!fs.existsSync(path.join(state, 'runtime')));
@@ -253,4 +267,56 @@ test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/wo
   copyRuntime(dest, kit);
   assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs', 'session-organize-once', 'session-organize-once/session_organize_once.py']);
   assert.ok(fs.existsSync(path.join(dest, 'LESSONS.md')));
+});
+
+test('上下文提醒（#105）：旧路径条目重装时换成 runtime 副本；配置和提醒记录从旧位置迁移，已有的不覆盖、旧目录不删', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const settings = path.join(home, '.claude', 'settings.json');
+  const legacy = path.join(home, '.claude', 'hooks', 'context-handoff');
+  fs.mkdirSync(path.join(legacy, 'state'), { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'config.json'), '{"context_window":200000,"thresholds":[0.6]}');
+  fs.writeFileSync(path.join(legacy, 'state', 'aaa.json'), '[0.5]');
+  fs.writeFileSync(path.join(legacy, 'state', 'bbb.json'), '[0.5, 0.7]');
+  const legacyCmd = `/Library/Frameworks/Python.framework/Versions/3.14/bin/python3 ${path.join(legacy, 'context_handoff.py')}`;
+  const theirs = { type: 'command', command: 'echo theirs' };
+  fs.writeFileSync(settings, JSON.stringify({ hooks: {
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: legacyCmd, timeout: 5, statusMessage: '检查上下文用量' }, theirs] }],
+    PostToolUse: [{ hooks: [{ type: 'command', command: legacyCmd, timeout: 5 }] }],
+  } }));
+  // 状态目录里已有一条同名记录：不被旧的覆盖
+  fs.mkdirSync(path.join(state, 'context-handoff', 'state'), { recursive: true });
+  fs.writeFileSync(path.join(state, 'context-handoff', 'state', 'bbb.json'), '[0.5]');
+  const run = extra => quiet(() => main([...extra, '--only', 'claude', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: state }));
+
+  assert.match(ensureHandoffConfig(state, home), /迁移[\s\S]*1 条提醒记录/);
+  assert.equal(run(['--apply']), 0);
+  const after = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  const all = ev => after.hooks[ev].flatMap(g => g.hooks.map(h => h.command));
+  for (const ev of ['UserPromptSubmit', 'PostToolUse']) {
+    assert.ok(!all(ev).some(c => c.includes(legacy)), `${ev} 里旧路径已去掉`);
+    assert.equal(all(ev).filter(c => c.includes(path.join(state, 'runtime', 'hooks', 'context-handoff'))).length, 1, `${ev} 里只有一条新的`);
+  }
+  assert.deepEqual(after.hooks.UserPromptSubmit[0].hooks, [theirs], '同组里别人的 hook 保留');
+  const dir = path.join(state, 'context-handoff');
+  assert.equal(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), '{"context_window":200000,"thresholds":[0.6]}', '配置从旧位置迁过来');
+  assert.equal(fs.readFileSync(path.join(dir, 'state', 'aaa.json'), 'utf8'), '[0.5]', '旧记录拷过来');
+  assert.equal(fs.readFileSync(path.join(dir, 'state', 'bbb.json'), 'utf8'), '[0.5]', '已有的同名记录不覆盖');
+  assert.ok(fs.existsSync(path.join(legacy, 'state', 'aaa.json')) && fs.existsSync(path.join(legacy, 'config.json')), '旧目录不删');
+  assert.match(ensureHandoffConfig(state, home), /已在[^；]*，不动$/, '再装一次：配置不动，没有要拷的记录');
+
+  assert.equal(run(['--uninstall', '--apply']), 0);
+  const removed = JSON.parse(fs.readFileSync(settings, 'utf8'));
+  assert.deepEqual(removed.hooks.UserPromptSubmit, [{ hooks: [theirs] }]);
+  assert.equal(removed.hooks.PostToolUse, undefined, '卸载会一并去掉上下文提醒');
+});
+
+test('上下文提醒配置：没有旧位置时拷示例；预览不写', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const sd = path.join(home, 'state');
+  const dest = path.join(sd, 'context-handoff', 'config.json');
+  assert.match(ensureHandoffConfig(sd, home), /拷示例/);
+  assert.ok(!fs.existsSync(dest), '预览不写');
+  ensureHandoffConfig(sd, home, { write: true });
+  assert.equal(fs.readFileSync(dest, 'utf8'), fs.readFileSync(new URL('../config/context-handoff.example.json', import.meta.url), 'utf8'));
 });
