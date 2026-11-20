@@ -4,6 +4,7 @@
   "repos": [
     "/Users/you/Documents/ChatGPT/个人/work/agent-kit"
   ],
+  "workRoot": "/Users/you/Documents/ChatGPT/个人/work",
   "fetch": true,
   "mainBranch": "main"
 }

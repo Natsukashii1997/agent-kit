@@ -175,3 +175,34 @@ test('思维评审三层分开计数：提醒的会话、其中调用 skill 的�
   const off = byName(runDoctor({ home, env: { POSTPANE_HANDOFFS: handoffs }, dir, run: realRun, config: {}, now }), '近 7 天思维评审触发');
   assert.match(off.detail[0], /已手动关闭/);
 });
+
+test('仓库钩子：带 scripts/hooks 的仓库没装 core.hooksPath 要报，并给安装命令；装了的、不带钩子的不报（复盘 P6，2026-11-20）', () => {
+  const home = fakeHome();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-work-'));
+  const repo = (name, { hooks = true, hooksPath } = {}) => {
+    const r = path.join(work, name);
+    spawnSync('git', ['init', '-q', r]);
+    if (hooks) {
+      fs.mkdirSync(path.join(r, 'scripts', 'hooks'), { recursive: true });
+      fs.writeFileSync(path.join(r, 'scripts', 'hooks', 'pre-push'), '#!/bin/sh\n');
+    }
+    if (hooksPath) spawnSync('git', ['-C', r, 'config', 'core.hooksPath', hooksPath]);
+  };
+  repo('装好了', { hooksPath: 'scripts/hooks' });
+  repo('没装');
+  repo('指向别处', { hooksPath: '/dev/null' });
+  repo('不带钩子', { hooks: false });
+  fs.mkdirSync(path.join(work, '不是仓库'));
+  const r = byName(runDoctor({ home, env: {}, dir, run: realRun, config: { workRoot: work } }), '仓库钩子已装');
+  assert.equal(r.status, 'warn');
+  const text = r.detail.join('\n');
+  assert.match(text, /没装[\s\S]*指向别处|指向别处[\s\S]*没装/);
+  assert.doesNotMatch(text, /装好了|不带钩子|不是仓库/);
+  assert.match(text, /git -C .*没装.* config core\.hooksPath scripts\/hooks/);
+
+  for (const name of ['没装', '指向别处']) spawnSync('git', ['-C', path.join(work, name), 'config', 'core.hooksPath', 'scripts/hooks']);
+  const ok = byName(runDoctor({ home, env: {}, dir, run: realRun, config: { workRoot: work } }), '仓库钩子已装');
+  assert.equal(ok.status, 'ok');
+  assert.match(ok.detail[0], /3 个仓库/);
+});
