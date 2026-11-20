@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // 第 3 件（含第 5 件的比对）：agent-kit 自检。只查 agent-kit 自己装进本机的东西和它管的约定：
-// 权限规则与 hook 装没装、能不能真跑；两份全局指令是否一致；自动记忆状态；坑提醒命中；可选查各仓库本地 main 有没有没推的提交。
+// 权限规则与 hook 装没装、能不能真跑；两份全局指令是否一致；自动记忆状态；坑提醒命中；可选查各仓库本地 main 有没有没推的提交；
+// 带 scripts/hooks 的仓库有没有装 core.hooksPath。
 // launchd、Hermes 定时任务、crontab 的体检归 my-skills 的 automation-checkup（my-skills#30），这里不重复做。
 //   node tools/doctor.mjs              体检，结果打在屏幕上，同时存一份报告
 //   node tools/doctor.mjs --json       输出 JSON（给定时任务或别的脚本用）
@@ -328,6 +329,32 @@ function checkRepos({ config, run }) {
   });
 }
 
+// 仓库钩子（复盘 P6，2026-11-20）：项目目录下带 scripts/hooks/pre-push 的仓库，本机要装 core.hooksPath=scripts/hooks，
+// 否则推送前检查、提交前检查悄悄不跑。只读，不替你装（装回由人决定：钩子有问题时会有意停用）。
+// 项目目录默认 ~/Documents/ChatGPT/个人/work，可用 doctor.json 的 workRoot 或 AGENT_KIT_WORK_ROOT 覆盖（同 weekly-review）
+function checkRepoHooks({ config, env, home, run }) {
+  const name = '仓库钩子已装';
+  const root = config.workRoot || env.AGENT_KIT_WORK_ROOT || path.join(home, 'Documents', 'ChatGPT', '个人', 'work');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory());
+  } catch {
+    return { name, status: 'info', detail: [`没找到项目目录 ${root}，不查`] };
+  }
+  const repos = entries.map(e => path.join(root, e.name)).filter(r => fs.existsSync(path.join(r, 'scripts', 'hooks', 'pre-push')) && fs.existsSync(path.join(r, '.git')));
+  if (!repos.length) return { name, status: 'info', detail: [`${root} 下没有带 scripts/hooks 的仓库`] };
+  const bad = repos.map(r => ({ r, v: run('git', ['-C', r, 'config', 'core.hooksPath']).stdout.trim() })).filter(x => x.v !== 'scripts/hooks');
+  if (!bad.length) return { name, status: 'ok', detail: [`${repos.length} 个仓库都装了 core.hooksPath=scripts/hooks`] };
+  return {
+    name,
+    status: 'warn',
+    detail: [
+      `${bad.length}/${repos.length} 个仓库带了钩子却没装，推送前、提交前检查不会跑（有意停用时可忽略）：`,
+      ...bad.map(({ r, v }) => `  ${path.basename(r)}：${v ? `指向 ${v}` : '没装'}，装：git -C "${r}" config core.hooksPath scripts/hooks`),
+    ],
+  };
+}
+
 export function runDoctor(deps = {}) {
   const env = deps.env || process.env;
   const home = deps.home || os.homedir();
@@ -347,6 +374,7 @@ export function runDoctor(deps = {}) {
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
     ...checkRepos(ctx),
+    checkRepoHooks(ctx),
   ];
 }
 
