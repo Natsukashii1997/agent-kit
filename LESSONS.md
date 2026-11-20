@@ -643,3 +643,29 @@
 - 出现过的项目：niuma-home。同样「见 `ENOENT` 就判没装」的写法还有 github-center `src/agent.js:141`（工作目录用 `mkdtempSync` 现建，未踩）、digiworld `server/agent-inventory.mjs:129`（未踩）。
 - 升级：〔提醒〕未升级（2026-11-20，agent-kit#95，常浩批）：只有关键词提醒。〔机检〕做不到：`cwd` 运行时在不在，静态检查判不了；niuma-home 自己的测试只算项目内的〔机检〕。
 - 触发：`/spawn\w*\([^)]*cwd/`、`/ENOENT[^\n]{0,40}(未安装|missing|not.?installed)/`
+
+## G-46 git 钩子里跑的测试自己做 git 操作，从 worktree 触发时落到了真实仓库（2026-11-20 新增）
+
+- 现象：推送前钩子跑项目测试，测试在临时目录里建仓库、提交、推送。从主目录推送一切正常；从 worktree 推送，测试照样全过，但推送的分支多出测试造的提交（2 个变 5 个），主目录被改成 `core.bare=true`，之后任何 git 操作都报 `must be run in a work tree`。
+- 根因：git 在 worktree 里运行钩子时，把 `GIT_DIR` 等仓库位置变量导出给钩子；钩子里起的子进程（测试、脚本）都继承它们，`git init`、`git -C <临时目录>` 也不再指向临时目录，而是操作真实仓库。主目录推送时 git 不导出这些变量，所以只在 worktree 里出事。属于 G-29「测试碰到正式环境」的一种。
+- 正确做法：
+  - 钩子在 `cd "$(git rev-parse --show-toplevel)"` 之后、跑任何检查之前，先 `unset $(git rev-parse --local-env-vars)`。
+  - 测试里自己起的 git 子进程不继承这些变量（传入清理过的 `env`），不依赖调用方替它清。
+  - 钩子的测试里要有一条「从 worktree 真推」的用例：临时仓库加 worktree 加本机裸仓库，推送后断言分支提交数不变、主仓库 `core.bare` 仍是 `false`。
+- 来源：起步骨架 0.4.0（my-skills#112）装进 8 个仓库的 pre-push；2026-11-20 检查新 PR 时在临时仓库用 PR 原文件复现。修复：骨架 0.4.1（my-skills#116，`9ae5f2c`），各仓库 disk-slim#15、get-index#5、little-steps#8、multi-agent#13、obsidian-kb#4、ui-system#4、chatgpt-clipper#18、postpane#471。证据 `~/Library/Application Support/agent-kit/evidence/2026-11-20-pre-push-hook-gitdir/`。
+- 出现过的项目：my-skills 起步骨架，以及装了它的 8 个仓库（实测只在临时仓库复现，8 个真实仓库在停用前都没中招）。
+- 升级：〔机检〕部分升级（2026-11-20，my-skills#116）：骨架 0.4.1 的 pre-push 自带清变量，`tests/hooks.test.mjs` 的「从 worktree 推送」用例随 pre-push 必跑，删掉那一行就推不上去；范围是用骨架 0.4.1 钩子的仓库。不覆盖：别的钩子框架（husky、lefthook 等）和其他项目自写的、会在钩子里起 git 子进程的脚本。
+- 触发：`/scripts\/hooks\/pre-(push|commit)/`、`/GIT_DIR=/`
+
+## G-47 钩子只在主目录验过，从 worktree 推送才出的问题看不出来（2026-11-20 新增）
+
+- 现象：钩子在主目录里跑、手动执行 `sh scripts/hooks/pre-push` 都通过，装好后从 worktree 一推就把仓库弄坏（G-46）。修好合并后，个别早先拉过旧 main 的 worktree 检出的还是旧钩子，装回后从那里推一样会出事。
+- 根因：worktree 里运行钩子和主目录不同（会导出 `GIT_DIR` 等变量）；手动执行钩子脚本也不会带这些变量，等于没测到。`core.hooksPath` 写相对路径时，每个 worktree 用的是自己检出的那份钩子，主分支修好了，不等于每个 worktree 都修好了。
+- 正确做法：
+  - 钩子的验收必须从 worktree 真推一次：`git push --dry-run origin HEAD:refs/heads/<不存在的分支>` 会触发 pre-push 且远端不留分支。推前推后对比分支提交数、`core.bare`、有没有测试造的提交，并确认输出里钩子确实跑了。
+  - 对比时注意别的会话可能同时在这个仓库提交或合并：数字变了先查 `git reflog` 和提交作者，再下结论。
+  - 装回修好的钩子之前，列出每个 worktree 检出的钩子版本；还是旧版的，等它合进新 main 再装，或给它单独 `git config --worktree core.hooksPath <主目录>/scripts/hooks`（需 `extensions.worktreeConfig=true`）。
+- 来源：同 G-46（2026-11-20）；postpane 装回时 `466-not-pressed` worktree 仍是旧钩子，验收记录见证据目录 `7-装回与worktree验收.txt`。
+- 出现过的项目：my-skills 起步骨架、postpane。
+- 升级：〔机检〕部分升级（2026-11-20，my-skills#116）：「从 worktree 推送」已做成骨架钩子测试里的用例，随 pre-push 必跑。不覆盖：装回时检查各 worktree 检出的钩子版本、真实仓库里的推送验收，这两步只能靠文字和本条提醒。
+- 触发：`core.hooksPath`
