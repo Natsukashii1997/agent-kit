@@ -190,7 +190,8 @@ function checkHooks({ home, run, env, dir }) {
   } catch (err) {
     leak = { code: null, stdout: '', stderr: `摆不出临时仓库：${err.message}` };
   }
-  const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Bash', tool_input: { command: 'launchctl list' } }, { AGENT_KIT_NO_LOG: '1' });
+  // G-05 只在改文件时提醒（瘦身提案 S4），自检用「写一份 LaunchAgents 里的 plist」
+  const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Write', tool_input: { file_path: path.join(home, 'Library', 'LaunchAgents', 'com.agent-kit.doctor.plist'), content: '<plist/>' } }, { AGENT_KIT_NO_LOG: '1' });
   const p = runHook('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }, { AGENT_KIT_NO_LOG: '1' });
   const okG = g.code === 0 && g.stdout.includes('"deny"');
   const okL = leak.code === 0 && leak.stdout.includes('"deny"') && leak.stdout.includes('origin/main');
@@ -200,9 +201,9 @@ function checkHooks({ home, run, env, dir }) {
   const leakOnlyStale = okG && okR && okP && !okL && stale.includes(path.join('hooks', 'guard-git.mjs'));
   results.push(
     leakOnlyStale
-      ? { name: 'hook 实跑自检', status: 'warn', detail: ['强推 main 被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下', '已装的 guard-git 是旧副本，还没有推送前检查（#76）：仓库在 main 上、拉到最新后重跑 node tools/install.mjs --apply'] }
+      ? { name: 'hook 实跑自检', status: 'warn', detail: ['强推 main 被拦下；写 LaunchAgents 里的 plist 收到 G-05 提醒；rm 变量加通配符被预检拦下', '已装的 guard-git 是旧副本，还没有推送前检查（#76）：仓库在 main 上、拉到最新后重跑 node tools/install.mjs --apply'] }
       : okG && okL && okR && okP
-      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；带着本地 main 没推的提交推分支被拦下；launchctl 收到 G-05 提醒；rm 变量加通配符被预检拦下（${hasGuard && hasRemind && hasPrecheck ? '按设置里的命令实跑' : '有没装的，用仓库里的脚本试跑'}）`] }
+      ? { name: 'hook 实跑自检', status: 'ok', detail: [`强推 main 被拦下；带着本地 main 没推的提交推分支被拦下；写 LaunchAgents 里的 plist 收到 G-05 提醒；rm 变量加通配符被预检拦下（${hasGuard && hasRemind && hasPrecheck ? '按设置里的命令实跑' : '有没装的，用仓库里的脚本试跑'}）`] }
       : {
           name: 'hook 实跑自检',
           status: 'fail',
@@ -261,23 +262,38 @@ function checkAutoMemory({ home }) {
   };
 }
 
+// 分开数「真正提醒」和「关键词匹配」（瘦身提案 M4）：同一会话同一条只提醒一次，匹配数会把常见词放大几十倍。
+// 按提醒次数排，每条写「提醒 X 次（Y 个会话）/ 匹配 Z 次」。
 function checkLessonHits({ now, dir }) {
   const text = readText(path.join(dir, 'lessons-hits.jsonl'));
   const since = now - 7 * 864e5;
-  const counts = {};
+  const by = {};
+  const sessions = new Set();
   for (const line of (text || '').split('\n')) {
     if (!line.trim()) continue;
     try {
       const row = JSON.parse(line);
       if (Date.parse(row.time) < since) continue;
-      for (const id of row.ids || []) counts[id] = (counts[id] || 0) + 1;
+      sessions.add(row.session);
+      for (const id of row.ids || []) (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() }).matched += 1;
+      for (const id of row.reminded || []) {
+        const e = (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() });
+        e.reminded += 1;
+        e.sessions.add(row.session);
+      }
     } catch {}
   }
-  const list = Object.entries(counts).sort((x, y) => y[1] - x[1]);
+  const list = Object.entries(by).sort((x, y) => y[1].reminded - x[1].reminded || y[1].matched - x[1].matched);
+  const total = list.reduce((n, [, e]) => n + e.reminded, 0);
   return {
-    name: '近 7 天坑提醒命中',
+    name: '近 7 天坑提醒',
     status: 'info',
-    detail: list.length ? [list.map(([id, n]) => `${id}×${n}`).join('、')] : ['没有命中（或 hook 还没装）'],
+    detail: list.length
+      ? [
+          `一共提醒 ${total} 次，${sessions.size} 个会话，平均每会话 ${(total / Math.max(sessions.size, 1)).toFixed(1)} 条`,
+          list.map(([id, e]) => `${id} 提醒 ${e.reminded} 次（${e.sessions.size} 个会话）/ 匹配 ${e.matched} 次`).join('、'),
+        ]
+      : ['没有命中（或 hook 还没装）'],
   };
 }
 

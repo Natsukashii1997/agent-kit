@@ -206,3 +206,23 @@ test('仓库钩子：带 scripts/hooks 的仓库没装 core.hooksPath 要报，�
   assert.equal(ok.status, 'ok');
   assert.match(ok.detail[0], /3 个仓库/);
 });
+
+test('近 7 天坑提醒：分开数真正提醒和关键词匹配，按提醒次数排（瘦身提案 M4）', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const now = Date.parse('2026-11-20T12:00:00Z');
+  const t = h => new Date(now - h * 3600e3).toISOString();
+  const rows = [
+    { time: t(1), session: 'a', ids: ['G-03'], reminded: ['G-03'] },
+    { time: t(1), session: 'a', ids: ['G-03'], reminded: [] },
+    { time: t(1), session: 'a', ids: ['G-03'], reminded: [] },
+    { time: t(2), session: 'b', ids: ['G-03', 'G-04'], reminded: ['G-04'] },
+    { time: t(2), session: 'c', ids: ['G-04'], reminded: ['G-04'] },
+    { time: t(24 * 9), session: 'old', ids: ['G-03'], reminded: ['G-03'] },
+  ];
+  fs.writeFileSync(path.join(dir, 'lessons-hits.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  const r = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {}, now }), '近 7 天坑提醒');
+  assert.equal(r.status, 'info');
+  assert.equal(r.detail[0], '一共提醒 3 次，3 个会话，平均每会话 1.0 条');
+  assert.equal(r.detail[1], 'G-04 提醒 2 次（2 个会话）/ 匹配 2 次、G-03 提醒 1 次（1 个会话）/ 匹配 4 次');
+});

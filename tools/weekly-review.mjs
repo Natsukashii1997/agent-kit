@@ -107,9 +107,11 @@ const isPrime = (level, status) => WEAK.includes(level) && status !== '关闭';
 const statusMark = status => (status === '部分升级' ? '部分' : status === '关闭' ? '关闭' : '');
 
 // 按坑汇总再犯：[[坑, { n: 再犯条目数, projects: Set }]]，条目数多的在前。Markdown 和 --json 共用（#80）。
-export function recurrenceRows(files) {
+// merged：坑 → 并入的坑（LESSONS「并入 G-xx」）；项目里写的旧编号算到合并后的条目上（瘦身提案 S3、S5、S6）。
+export function recurrenceRows(files, merged = {}) {
   const by = {};
-  for (const f of files) for (const id of findRecurrences(f.text)) {
+  for (const f of files) for (const raw of findRecurrences(f.text)) {
+    const id = merged[raw] || raw;
     by[id] ||= { n: 0, projects: new Set() };
     by[id].n += 1;
     by[id].projects.add(f.project);
@@ -118,8 +120,8 @@ export function recurrenceRows(files) {
 }
 
 // statuses：坑 → 状态词；「部分升级」在层级列里显示「部分」，提醒读者这一层没管全（审查 P2-02）；「关闭」显示「关闭」。
-export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}) {
-  const rows = recurrenceRows(files);
+export function summarizeRecurrence(files, titles = {}, levels = {}, statuses = {}, merged = {}) {
+  const rows = recurrenceRows(files, merged);
   const head = scanned(files);
   if (!rows.length) return [`${head}没有标「再犯：G-xx」的条目。`, '', '口径：踩到已有全局坑时，在项目 LESSONS 的新条目（或 CURRENT.md 的记录）里写「再犯：G-xx」才算；没标的不计，所以这里是下限。'];
   const prime = rows.filter(([id]) => isPrime(levels[id], statuses[id])).map(([id]) => id);
@@ -209,6 +211,7 @@ function globalLessons(text = fs.readFileSync(LESSONS_FILE, 'utf8')) {
     titles: Object.fromEntries(lessons.map(e => [e.id, e.title])),
     levels: Object.fromEntries(lessons.filter(e => e.level).map(e => [e.id, e.level])),
     statuses: Object.fromEntries(lessons.map(e => [e.id, e.status])),
+    merged: Object.fromEntries(lessons.filter(e => e.mergedInto).map(e => [e.id, e.mergedInto])),
   };
 }
 
@@ -217,9 +220,9 @@ function globalLessons(text = fs.readFileSync(LESSONS_FILE, 'utf8')) {
 //   promotions：项目 LESSONS 里等批的条目，proposed 为 true 的是升级行明确写了「提议提升」的（Markdown 里的〔提议〕）。
 // 只读：不跑自检、不写文件。
 export function buildJson({ now = Date.now(), workRoot = defaultWorkRoot(), lessonsText } = {}) {
-  const { titles, levels, statuses } = globalLessons(lessonsText);
+  const { titles, levels, statuses, merged } = globalLessons(lessonsText);
   const files = projectFiles(workRoot);
-  const recurrences = recurrenceRows(files)
+  const recurrences = recurrenceRows(files, merged)
     .map(([id, v]) => ({ id, title: titles[id] || '', level: levels[id] || null, status: statuses[id] || null, prime: isPrime(levels[id], statuses[id]), count: v.n, projects: [...v.projects] }))
     .sort((a, b) => b.prime - a.prime || b.count - a.count);
   const byFile = promotionsByFile(files);
@@ -239,7 +242,7 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWo
 
   lines.push('## 1. agent-kit 自检', '', '```', ...formatReport(runDoctor({ dir }), new Date(now).toISOString()), '```', '');
 
-  const { titles, levels, statuses } = globalLessons();
+  const { titles, levels, statuses, merged } = globalLessons();
   let hits = '';
   try {
     hits = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8');
@@ -247,7 +250,7 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWo
   lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
 
   const files = projectFiles(workRoot);
-  lines.push('## 3. 再犯', '', ...summarizeRecurrence(files, titles, levels, statuses), '');
+  lines.push('## 3. 再犯', '', ...summarizeRecurrence(files, titles, levels, statuses, merged), '');
 
   lines.push('## 4. 等批的提升', '', ...summarizePromotions(files), '');
 

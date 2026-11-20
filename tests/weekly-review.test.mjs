@@ -239,3 +239,15 @@ test('--json 和 Markdown 的再犯、等批两节出自同一份汇总（#80）
   assert.equal(j.promotions[0].proposed, true);
   assert.equal(j.recurrences[0].level, null);
 });
+
+test('再犯：写的是被并入的旧编号，算到合并后的条目上（瘦身提案 S3、S5、S6）', async () => {
+  const { summarizeRecurrence, buildJson } = await import('../tools/weekly-review.mjs');
+  const out = summarizeRecurrence([{ project: 'a', text: '再犯：G-23' }, { project: 'b', text: '再犯：G-04' }], { 'G-04': '并行会话' }, { 'G-04': '文字' }, {}, { 'G-23': 'G-04' }).join('\n');
+  assert.match(out, /\| G-04 并行会话 \| 〔文字〕 \| 2 \| a、b \|/);
+  assert.ok(!out.includes('G-23'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-wr-merged-'));
+  fs.mkdirSync(path.join(root, 'p', 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'p', 'docs', 'LESSONS.md'), '## L-01 x\n- 再犯：G-47\n');
+  const j = buildJson({ workRoot: root });
+  assert.deepEqual(j.recurrences.map(r => [r.id, r.count]), [['G-46', 1]]);
+});
