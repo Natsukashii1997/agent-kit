@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 第 4 件的一部分：每周整理的输入材料。把几样只有 agent-kit 有的数据汇成一份 Markdown，存在状态目录 weekly/ 下：
 //   1. agent-kit 自检结果（tools/doctor.mjs）；
-//   2. 近 7 天哪几条全局坑被 hook 碰到了几次（lessons-hits.jsonl），附在哪些项目、几个会话碰到的；
+//   2. 近 7 天哪几条全局坑被 hook 提醒了几次、关键词匹配了几次（lessons-hits.jsonl），附在哪些项目、几个会话；
 //   3. 再犯（#13）：各项目 docs/LESSONS.md、LESSONS.md、CURRENT.md 里写了「再犯：G-xx」的条目，按坑汇总，附该坑的层级（#57），
 //      〔文字〕〔提醒〕层又再犯的单列为升级首选。这是规则写回后的效果数据，
 //      每周一份留在 weekly/，前后几期对比就是「改进前后对比」。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 AGENT_KIT_WORK_ROOT 覆盖；
@@ -22,9 +22,12 @@ import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { parseLessons, LESSONS_FILE } from '../hooks/lessons-remind.mjs';
 import { formatReport, runDoctor } from './doctor.mjs';
 
+// 真正提醒和关键词匹配分开数（和 doctor「近 7 天坑提醒」同口径，2026-11-21 常浩批）：同一会话同一条只提醒一次，
+// 只看匹配数会把常见词放大几十倍（G-03 一周匹配 3126 次、提醒 127 次）。按提醒次数排，项目按匹配到的目录算。
 export function summarizeHits(text, now, titles = {}) {
   const since = now - 7 * 864e5;
   const by = {};
+  const sessions = new Set();
   for (const line of String(text || '').split('\n')) {
     if (!line.trim()) continue;
     let row;
@@ -34,21 +37,29 @@ export function summarizeHits(text, now, titles = {}) {
       continue;
     }
     if (Date.parse(row.time) < since) continue;
+    if (row.session) sessions.add(row.session);
     for (const id of row.ids || []) {
-      by[id] ||= { n: 0, projects: new Set(), sessions: new Set() };
-      by[id].n += 1;
-      if (row.cwd) by[id].projects.add(path.basename(row.cwd));
-      if (row.session) by[id].sessions.add(row.session);
+      const e = (by[id] ||= { matched: 0, reminded: 0, projects: new Set(), sessions: new Set() });
+      e.matched += 1;
+      if (row.cwd) e.projects.add(path.basename(row.cwd));
+    }
+    for (const id of row.reminded || []) {
+      const e = (by[id] ||= { matched: 0, reminded: 0, projects: new Set(), sessions: new Set() });
+      e.reminded += 1;
+      if (row.session) e.sessions.add(row.session);
     }
   }
-  const rows = Object.entries(by).sort((a, b) => b[1].n - a[1].n);
+  const rows = Object.entries(by).sort((a, b) => b[1].reminded - a[1].reminded || b[1].matched - a[1].matched);
   if (!rows.length) return ['近 7 天没有命中（或 hook 还没装）。'];
+  const total = rows.reduce((n, [, e]) => n + e.reminded, 0);
   return [
-    '| 坑 | 命中次数 | 会话数 | 项目 |',
-    '|---|---|---|---|',
-    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${v.n} | ${v.sessions.size} | ${[...v.projects].join('、') || '—'} |`),
+    `一共提醒 ${total} 次，${sessions.size} 个会话，平均每会话 ${(total / Math.max(sessions.size, 1)).toFixed(1)} 条。同一会话同一条只提醒一次；匹配是关键词比对上的次数，常见词会被放大。`,
     '',
-    '看法提示：同一条在两个以上项目被碰到，按 LESSONS「怎么升级」考虑升级；命中很多但从没真出过事的，可能是「触发」词太宽，考虑收窄。',
+    '| 坑 | 提醒次数（会话数） | 匹配次数 | 项目 |',
+    '|---|---|---|---|',
+    ...rows.map(([id, v]) => `| ${id} ${titles[id] || ''} | ${v.reminded}（${v.sessions.size}） | ${v.matched} | ${[...v.projects].join('、') || '—'} |`),
+    '',
+    '看法提示：同一条在两个以上项目被碰到，按 LESSONS「怎么升级」考虑升级；匹配次数远大于提醒次数、又从没真出过事的，可能是「触发」词太宽，考虑收窄或限定「改文件」「主目录」。',
   ];
 }
 
@@ -247,7 +258,7 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWo
   try {
     hits = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8');
   } catch {}
-  lines.push('## 2. 近 7 天全局坑提醒命中', '', ...summarizeHits(hits, now, titles), '');
+  lines.push('## 2. 近 7 天全局坑提醒', '', ...summarizeHits(hits, now, titles), '');
 
   const files = projectFiles(workRoot);
   lines.push('## 3. 再犯', '', ...summarizeRecurrence(files, titles, levels, statuses, merged), '');
