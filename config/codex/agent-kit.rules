@@ -57,7 +57,7 @@ prefix_rule(
 prefix_rule(
     pattern = ["gh", "pr", "merge"],
     decision = "prompt",
-    justification = "合并由常浩说了算（《工程流程》第 5 节）。",
+    justification = "直接合并只用于常浩说了「合并」的例外 PR；能按策略合的用 merge_act.py auto 交给 Hermes（《工程流程》第 5 节）。",
     match = ["gh pr merge 12 --squash"],
     not_match = ["gh pr view 12"],
 )
