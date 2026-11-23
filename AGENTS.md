@@ -7,6 +7,7 @@ Claude 和 Codex 跨项目共用的协作底座：全局坑 LESSONS 和项目起
 - 改 LESSONS 和骨架都只出提案，常浩批准才写；每次改动单独提交，提交说明写来源（项目名 + 条目号，或每周整理的提案编号）。
 - 骨架 project-starter 已迁到 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/`（自建 skill 统一放 my-skills），改骨架在那个仓库改，改前先在临时目录试铺。
 - 不往这里写任何人的私人信息、账号或凭据。
+- 跨会话的主线清单在 `CURRENT.md`「主线」节，状态一变就改。常浩定过的内容登记在 `docs/DECIDED.md`，要改登记过的先单独问他。
 - 改了 `hooks/`、`config/`、`tools/` 或 LESSONS 的「触发」行，跑 `node --test tests/*.test.mjs`，交接里贴原样结果；这些文件装在常浩本机，改坏了会影响所有会话。用法见 [docs/机器执行层.md](docs/机器执行层.md)。
 
 ## Agent skills
