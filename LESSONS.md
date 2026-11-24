@@ -682,3 +682,18 @@
 - 已并入 G-46（2026-11-20，瘦身提案 S6，常浩批）：内容和触发词都移到 G-46；编号保留，项目里写的「再犯：G-47」按 G-46 统计。
 - 触发：无（已并入 G-46）
 - 升级：〔机检〕并入 G-46（2026-11-20，瘦身提案 S6）。此前：〔机检〕部分升级（2026-11-20，my-skills#116）。
+
+## G-49 浏览器插件的接口替身按想象写，测试全绿、真实 Chrome 对不上（2026-11-24 提升）
+
+- 现象：插件测试里的 `chrome.*` 替身每一轮都全绿，审查却一轮轮指出真实浏览器里走不通：被回收的标签页重载后换了编号，按旧编号重载的路径根本走不到；用来判断「页面在不在写」的缓存字段只在加载、换页、切前后台时更新，开始写和写完都不刷新。
+- 根因：替身是照「我以为 Chrome 会怎样」写的（回收后编号不变、`chrome.tabs.get` 对不存在的标签页返回空值），没有一条测试在真实浏览器里加载插件本身；缓存字段有人存、没人读，也就没人发现它不准。
+- 正确做法：
+  - 方案依赖浏览器对标签页做了什么（回收、崩溃、冻结、替换、注入被拒）时，先在真实 Chromium 里加载插件实测，再写替身和实现。做法：Playwright `launchPersistentContext` 加 `--load-extension`，用后台的 `worker.evaluate` 直接调插件自己的函数。
+  - 这类测试里顶替真实网站不要用 Playwright 的 `context.route`：插件自己 `chrome.tabs.create` 开的标签页，第一次加载发生在路由生效之前，会真的连出去。改用本机 HTTPS 服务器加 `--host-resolver-rules=MAP * 127.0.0.1:<端口>`、`--no-proxy-server`（本机有系统代理时不加会被代理接走）、`--ignore-certificate-errors`。
+  - 用一个缓存字段做判断之前，先搜它在哪些时刻被写；存了没人读的字段删掉。
+  - 判断「标签页里还有没有活页面」用 Chrome 自己的说法（如崩溃后 `tabs.get` 给 `status: "unloaded"`），不从报错反推；「注入被拒」只说明这一刻注不进去。
+  - 无头 Chromium 造不出真冻结（CDP `Page.setWebLifecycleState`、`chrome://discards` 的 Freeze 都没让 `tab.frozen` 变真），冻结相关的结论标「未实测」，规则写成不依赖它的具体表现。
+- 来源：postpane L-69（2026-11-22，#507；证据 `~/Library/Application Support/postpane/evidence/2026-11-22-507-tab-revive/real-chromium/`，真实 Chromium 测试 `src/apps/chrome-extension/test/chromium.test.mjs`）。
+- 出现过的项目：postpane（ChatGPT 通道 Chrome 插件，#507、#509 两次审查都在真实 Chromium 里查出替身测不出的问题）。
+- 升级：〔提醒〕未升级（2026-11-24，agent-kit#125，常浩批）：只有关键词提醒。项目内的〔机检〕是 postpane 的 `chromium.test.mjs`（第一条断言「回收后编号会换」，Chrome 改了行为会先红），不算全局机检。
+- 触发：`/(globalThis|window)\.chrome\s*=/`、`/const chrome\s*=\s*\{/`、`/--load-extension/`
