@@ -5,100 +5,62 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { classify, isScratchPath, LOG_FILE, promptSignal } from '../hooks/thinking-review-nudge.mjs';
+import { classify, LOG_FILE, promptSignal } from '../hooks/thinking-review-nudge.mjs';
 
 const HOOK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'thinking-review-nudge.mjs');
-const sig = p => promptSignal(p)?.signal ?? null;
+const sig = promptSignal;
 
-// 一份像样的「交来的方案」：长文、带方案类字眼
+// 一份像样的「交来的方案」：长文、带方案类字眼（#135 起不再因此提醒）
 const plan = (tag = '') =>
   `# 知识库同步改造方案 V2.0${tag}\n\n## 一、背景与目标\n现有同步靠手工导出，经常漏。本方案把同步改成增量拉取。\n\n## 二、架构\n` +
   '分三层：采集、比对、写入。比对层负责去重，写入层负责回滚。'.repeat(50) +
   '\n\n## 三、验收\n全量测试通过，前后对比无丢失。';
 
-test('交来的长方案：判为 handoff，同一份只算一个 key', () => {
-  assert.ok(plan().length >= 1200);
-  const a = promptSignal(plan());
-  assert.equal(a.signal, 'handoff');
-  assert.equal(promptSignal(plan()).key, a.key);
-  assert.notEqual(promptSignal(plan('（第二版）')).key, a.key);
+test('点名思维评审：短消息、长消息都提醒', () => {
+  for (const p of ['这个思维评审一下', '思维评审', '送 GPT 想一想这个方案', `${plan()}\n\n这份先思维评审一下`]) assert.equal(sig(p), 'asked', p.slice(-20));
 });
 
-test('一页长度的中文方案（约 600 字）也算交来方案', () => {
-  const page = `这是 GPT 给的任务书，按这个实施。\n# 同步状态持久化任务书\n## 目标\n${'推送中途被打断时清单会写坏，下次整库重传。'.repeat(14)}\n## 方案\n${'引入事务性存储，每推送成功一个文件就更新状态。'.repeat(8)}\n## 验收\n中断后不整库重传。`;
-  assert.ok(page.length >= 500 && page.length < 900, String(page.length));
-  assert.equal(sig(page), 'handoff');
+test('质疑方向或前提：「这个方向对吗」一类都提醒', () => {
+  for (const p of ['这个方向对吗', '方向对不对？', '我觉得方向不对，是不是想错了', '前提错了', '思路对吗', '推翻重来吧', '重新考虑一下方案', '这个要不要再论证'])
+    assert.equal(sig(p), 'doubt', p);
 });
 
-test('常浩的短指令和普通请求不提醒', () => {
+test('交来方案、普通请求、长文都不提醒（#135 去掉了「交来方案」时机）', () => {
+  assert.equal(sig(plan()), null, '交来的长方案');
   for (const p of ['按推荐开工', '合并', '把这个按钮改成蓝色', '跑一下测试看看', '已通过，合并', '帮我看下这个报错：TypeError: x is undefined'])
     assert.equal(sig(p), null, p);
-});
-
-test('长文但不是方案（报错日志、普通长问题）不提醒', () => {
   const log = 'Error: ENOENT: no such file or directory, open /x/y.json\n    at Object.openSync (node:fs:573:3)\n'.repeat(30);
-  assert.equal(sig(log), null);
-  assert.equal(sig(`${log}\nsee spec.ts`), null, '只有一个方案类字眼不够');
+  assert.equal(sig(`${log}\n方向不对`), null, '长文里的「方向不对」不算常浩在质疑');
 });
 
-test('点名思维评审、质疑方向、说不用送', () => {
-  assert.equal(sig('这个思维评审一下'), 'asked');
-  assert.equal(sig('我觉得方向不对，是不是想错了'), 'doubt');
-  assert.equal(sig('这个不用送，直接做'), 'optout');
-  assert.equal(sig('直接开工'), 'optout');
-  assert.equal(sig(`${plan()}\n不要再评审了`), 'handoff', '长文里的「不要评审」不当成常浩的指令');
+test('说「不用送 / 直接开工」不提醒，即使提到思维评审', () => {
+  for (const p of ['这个不用送，直接做', '直接开工', '不用思维评审了', '先不评审']) assert.equal(sig(p), null, p);
+});
+
+test('别的会话派来的任务（委派）不提醒：里面提到思维评审也不算常浩点名', () => {
+  assert.equal(sig(`Background (from the session that started this one):\n${plan()}\n去掉思维评审钩子的泛化提醒`), null);
+  assert.equal(sig('Task (from the session that started this one): 这个方向对吗'), null);
+  assert.equal(sig(`Please carry out this task for me.\n思维评审`), null);
 });
 
 test('后台事件、会话间通知、斜杠命令不提醒', () => {
-  assert.equal(sig(`<side-sessions-event>${plan()}</side-sessions-event>`), null);
-  assert.equal(sig(`<task-notification>\n<task-id>x</task-id>${plan()}`), null);
+  assert.equal(sig('<side-sessions-event>思维评审</side-sessions-event>'), null);
+  assert.equal(sig('<task-notification>\n<task-id>x</task-id>方向不对'), null);
   assert.equal(sig('[SYSTEM NOTIFICATION - NOT USER INPUT] 思维评审'), null);
   assert.equal(sig('/thinking-review 这个方案'), null);
-  assert.equal(sig(`This session is being continued from a previous conversation that ran out of context.\n${plan()}`), null, '压缩后的续接摘要');
-  assert.equal(sig(`The agent-hud plugin sent a message.\n${plan()}`), null, '驿窗转回的 GPT 回信');
-  assert.equal(sig(`<command-message>to-spec</command-message>\n${plan()}`), null, '斜杠命令展开');
+  assert.equal(sig('This session is being continued from a previous conversation that ran out of context.\n思维评审'), null, '压缩后的续接摘要');
+  assert.equal(sig('The agent-hud plugin sent a message.\n思维评审'), null, '驿窗转回的 GPT 回信');
+  assert.equal(sig('<command-message>to-spec</command-message>\n思维评审'), null, '斜杠命令展开');
   assert.equal(sig(''), null);
 });
 
-test('改文件节点：草稿、临时目录、Claude 自己的记忆不算', () => {
-  const home = os.homedir();
-  assert.ok(isScratchPath('/tmp/x.md'));
-  assert.ok(isScratchPath('/private/tmp/claude-501/s/scratchpad/a.html'));
-  assert.ok(isScratchPath(path.join(home, '.claude/projects/p/memory/a.md')));
-  assert.ok(!isScratchPath(path.join(home, 'Documents/proj/src/a.ts')));
-  assert.ok(!isScratchPath('/tmpfoo/a.ts'));
-  const e = f => classify({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: f } });
-  assert.equal(e('/Users/x/proj/a.ts').signal, 'first-edit');
-  assert.equal(e('/tmp/a.ts'), null);
-  assert.equal(classify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } }), null);
-  assert.equal(classify({ hook_event_name: 'PreToolUse', tool_name: 'ExitPlanMode', tool_input: { plan: 'x' } }).signal, 'plan');
-});
-
-test('Bash 里改文件也算第一次改文件；只读命令、写到草稿和 /dev/null 的不算', () => {
-  const b = (command, cwd = '/x/proj') => classify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd, tool_input: { command } })?.signal ?? null;
-  for (const c of [
-    "sed -i '' 's/#3366cc/#2f7d5b/' src/ui/status.html",
-    'sed -i.bak -e s/a/b/ a.txt',
-    "perl -pi -e 's/a/b/' x.js",
-    'echo hi > notes.md',
-    'cat >> src/a.js <<EOF\nx\nEOF',
-    'npm test | tee test.log',
-    'git apply fix.patch',
-    "python3 - <<'EOF'\nopen('a.py','w').write(s)\nEOF",
-  ])
-    assert.equal(b(c), 'first-edit', c);
-  for (const c of [
-    'git status',
-    'grep -rn x . 2>/dev/null',
-    'npm test 2>&1 | tail -5',
-    'ls > /dev/null',
-    'node a.mjs >&2',
-    'echo x > /tmp/a.txt',
-    "cat > /private/tmp/claude-501/s/scratchpad/a.md <<'EOF'\nx\nEOF",
-    "python3 - <<'EOF'\nprint(len(open('a').read()))\nEOF",
-    "sed -n 1,20p a.js",
-  ])
-    assert.equal(b(c), null, c);
+test('改文件、Bash 写文件、退出计划模式都不再是节点（#135）', () => {
+  const pre = (tool_name, tool_input) => classify({ hook_event_name: 'PreToolUse', tool_name, cwd: '/x/proj', tool_input });
+  assert.equal(pre('Edit', { file_path: '/Users/x/proj/a.ts' }), null);
+  assert.equal(pre('Write', { file_path: '/Users/x/proj/a.ts', content: 'x' }), null);
+  assert.equal(pre('Bash', { command: "sed -i '' 's/a/b/' src/a.js" }), null);
+  assert.equal(pre('ExitPlanMode', { plan: '新架构：把同步改成增量拉取' }), null);
+  assert.deepEqual(classify({ hook_event_name: 'UserPromptSubmit', prompt: '这个方向对吗' }), { event: 'prompt', signal: 'doubt' });
 });
 
 function harness() {
@@ -113,112 +75,44 @@ function harness() {
     assert.equal(r.status, 0, r.stderr);
     return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput : null;
   };
-  const log = () => fs.readFileSync(path.join(dir, LOG_FILE), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  const log = () => {
+    const f = path.join(dir, LOG_FILE);
+    return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').map(l => JSON.parse(l)) : [];
+  };
   return { dir, session, run, log };
 }
 
-test('作为 hook 真跑：提醒格式对、只提醒不做决定、同一节点只提醒一次', () => {
+test('作为 hook 真跑：点名提醒格式对、只提醒不做决定、同一信号一个会话只提醒一次', () => {
   const { run, log } = harness();
-  const p = run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
+  const p = run({ hook_event_name: 'UserPromptSubmit', prompt: '这个方案思维评审一下' });
   assert.equal(p.hookEventName, 'UserPromptSubmit');
   assert.match(p.additionalContext, /thinking-review/);
-  assert.match(p.additionalContext, /判断需要≠必须发起/);
+  assert.match(p.additionalContext, /常浩提到了思维评审/);
   assert.equal(p.permissionDecision, undefined);
-  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: plan() }), null, '同一份方案第二次不提醒');
-  assert.ok(run({ hook_event_name: 'UserPromptSubmit', prompt: plan('（V3）') }), '新的一份方案再提醒');
-
-  // 收到过交来方案、还没判断：第一次改文件拦一次（只拦这一次），之后照常放行、不再提醒
-  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: '/x/proj/a.ts', content: 'secret' } };
-  const first = run(edit);
-  assert.equal(first.hookEventName, 'PreToolUse');
-  assert.equal(first.permissionDecision, 'deny');
-  assert.match(first.permissionDecisionReason, /最多 3 次/);
-  // 同一轮并行的另一个写文件也要拦；拦满 3 次后放行，不会死循环
-  assert.equal(run({ ...edit, tool_name: 'Edit', tool_input: { file_path: '/x/proj/b.ts' } }).permissionDecision, 'deny');
-  assert.equal(run(edit).permissionDecision, 'deny');
-  assert.equal(run(edit), null);
-
-  const rows = log();
-  assert.deepEqual(rows.map(r => [r.event, r.signal, r.nudged]), [
-    ['prompt', 'handoff', true], ['prompt', 'handoff', false], ['prompt', 'handoff', true],
-    ['edit', 'gate', true], ['edit', 'gate', true], ['edit', 'gate', true], ['edit', 'first-edit', false],
-  ]);
-  const raw = JSON.stringify(rows);
-  assert.ok(!raw.includes('知识库') && !raw.includes('secret') && !raw.includes('a.ts'), '记录里不留提示词、文件内容和路径');
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: '再思维评审一下' }), null, '同一会话第二次点名不重复提醒');
+  const d = run({ hook_event_name: 'UserPromptSubmit', prompt: '这个方向对吗' });
+  assert.match(d.additionalContext, /质疑方向或前提/);
+  assert.match(d.additionalContext, /判断需要≠必须发起/);
+  assert.deepEqual(log().map(r => [r.event, r.signal, r.nudged]), [['prompt', 'asked', true], ['prompt', 'asked', false], ['prompt', 'doubt', true]]);
+  assert.ok(!JSON.stringify(log()).includes('方案'), '记录里不留提示词');
 });
 
-test('普通会话（没有高风险信号）：第一次改文件只提醒、不拦，并写明改动已经执行', () => {
+test('作为 hook 真跑：交来方案、普通改文件、退出计划模式、委派都不提醒、不拦、不记录', () => {
+  const { run, log } = harness();
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: plan() }), null, '交来方案');
+  assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } }), null, '普通改文件');
+  assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'echo x > notes.md' } }), null, 'Bash 写文件');
+  assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'ExitPlanMode', tool_input: { plan: 'p' } }), null, '退出计划模式');
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: `Background (from the session that started this one):\n${plan()}` }), null, '委派');
+  assert.deepEqual(log(), []);
+});
+
+test('点名之后改文件也不拦（#135 去掉了改文件拦截）', () => {
   const { run } = harness();
-  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
-  const first = run(edit);
-  assert.equal(first.permissionDecision, undefined);
-  assert.match(first.additionalContext, /这次改动已经执行/);
-  assert.equal(run(edit), null);
-});
-
-test('高风险候选：拦到调用了 thinking-review 为止', () => {
-  const { dir, session, run } = harness();
-  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
-  run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
-  assert.equal(run(edit).permissionDecision, 'deny');
-  fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), `${JSON.stringify({ time: 't', session, skill: 'thinking-review' })}\n`);
-  assert.equal(run(edit), null, '调用后放行');
-});
-
-test('高风险候选的拦截：已调用 skill 不拦；常浩说了直接开工不拦；点名、质疑方向也算高风险', () => {
-  const edit = { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } };
-  {
-    const { dir, session, run } = harness();
-    run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
-    fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), `${JSON.stringify({ time: 't', session, skill: 'thinking-review' })}\n`);
-    assert.equal(run(edit), null, '已判断：不拦也不提醒');
-  }
-  {
-    const { run } = harness();
-    run({ hook_event_name: 'UserPromptSubmit', prompt: plan() });
-    run({ hook_event_name: 'UserPromptSubmit', prompt: '直接开工' });
-    const r = run(edit);
-    assert.equal(r.permissionDecision, undefined, '直接开工：不拦，只提醒');
-  }
   for (const prompt of ['这个思维评审一下', '我觉得方向不对']) {
-    const { run } = harness();
     run({ hook_event_name: 'UserPromptSubmit', prompt });
-    assert.equal(run(edit).permissionDecision, 'deny', prompt);
+    assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } }), null, prompt);
   }
-});
-
-test('别的会话派来的任务：有上游依据就继承，没有就提醒；同一份重复派来只提醒一次', () => {
-  const brief = (extra = '') => `Background (from the session that started this one):\n${plan()}${extra}`;
-  assert.equal(sig(brief()), 'delegated', '缺继承证据');
-  assert.equal(sig(`Please carry out this task for me.\n${plan()}`), 'delegated');
-  assert.equal(sig(brief('\n准入：C｜按 V3.0 执行')), 'inherited', '带准入四行');
-  assert.equal(sig(brief('\n评审出口：成熟退出')), 'inherited', '带评审出口');
-  assert.equal(sig(brief('\n决策记录：docs/decisions/2026-11-07-sync.md')), 'inherited', '带决策记录文件');
-  assert.equal(sig('Task (from the session that started this one): 把按钮改成蓝色'), null, '短任务不算方案');
-
-  const { run, log } = harness();
-  const first = run({ hook_event_name: 'UserPromptSubmit', prompt: brief() });
-  assert.match(first.additionalContext, /派来的方案类任务/);
-  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: brief() }), null, '重复通知');
-  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: brief('\n准入：C｜按 V3.0 执行') }), null, '有效继承');
-  assert.deepEqual(log().map(r => [r.signal, r.skip ?? 'nudged']), [['delegated', 'nudged'], ['delegated', 'seen'], ['inherited', 'inherited']]);
-  const e = run({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } });
-  assert.equal(e.permissionDecision, undefined, '派来的任务只提醒、不拦');
-});
-
-test('本会话已调用过 thinking-review：动手前两个节点不再提醒，新方案照样提醒', () => {
-  const { dir, session, run, log } = harness();
-  fs.writeFileSync(path.join(dir, 'skill-usage.jsonl'), `${JSON.stringify({ time: 't', session, cwd: '/x', skill: 'thinking-review' })}\n`);
-  assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: '/x/proj/a.ts' } }), null);
-  assert.equal(run({ hook_event_name: 'PreToolUse', tool_name: 'ExitPlanMode', tool_input: { plan: 'p' } }), null);
-  assert.ok(run({ hook_event_name: 'UserPromptSubmit', prompt: plan() }));
-  assert.deepEqual(log().map(r => r.skip ?? 'nudged'), ['judged', 'judged', 'nudged']);
-});
-
-test('说「不用送」：记一行 optout，不提醒', () => {
-  const { run, log } = harness();
-  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: '这个不用送，直接做' }), null);
-  assert.deepEqual(log().map(r => r.skip), ['optout']);
 });
 
 test('出错一律静默放行：坏输入、状态目录不可写', () => {
@@ -227,13 +121,13 @@ test('出错一律静默放行：坏输入、状态目录不可写', () => {
   assert.equal(run({}), null);
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-trn-')), 'not-a-dir');
   fs.writeFileSync(file, '');
-  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: plan() }, { AGENT_KIT_STATE_DIR: file }), null);
+  assert.equal(run({ hook_event_name: 'UserPromptSubmit', prompt: '思维评审' }, { AGENT_KIT_STATE_DIR: file }), null);
 });
 
 test('耗时：单次调用在 1 秒内', () => {
   const { run } = harness();
   const t = Date.now();
-  for (let i = 0; i < 5; i++) run({ hook_event_name: 'UserPromptSubmit', prompt: `${plan()}${i}` });
+  for (let i = 0; i < 5; i++) run({ hook_event_name: 'UserPromptSubmit', prompt: `思维评审${i}` });
   const avg = (Date.now() - t) / 5;
   console.log(`thinking-review-nudge 平均每次 ${avg.toFixed(0)} ms（含 node 启动）`);
   assert.ok(avg < 1000);

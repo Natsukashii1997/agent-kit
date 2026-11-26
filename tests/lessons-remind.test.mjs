@@ -7,7 +7,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { findHits, haystackOf, LESSONS_FILE, LEVELS, matchLessons, parseLessons } from '../hooks/lessons-remind.mjs';
 
-const lessons = parseLessons(fs.readFileSync(LESSONS_FILE, 'utf8'));
+const LESSONS_TEXT = fs.readFileSync(LESSONS_FILE, 'utf8');
+const lessons = parseLessons(LESSONS_TEXT);
 const ids = haystack => matchLessons(lessons, haystack).map(e => e.id);
 
 test('LESSONS 每条 G-xx 都有「触发」一行，正则能编译', () => {
@@ -39,8 +40,6 @@ test('LESSONS 每条 G-xx 的「升级」一行以层级词开头（#57）', () 
 test('典型命令命中对应的坑', () => {
   // G-05 只在改文件时提醒（瘦身提案 S4），这条 Bash 只中 G-18
   assert.deepEqual(ids('launchctl bootout gui/501/com.x && launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.x.plist').sort(), ['G-18']);
-  assert.ok(ids('/usr/libexec/PlistBuddy -c "Print :x" a.plist').includes('G-06'));
-  assert.ok(ids('cp new.icns ~/Applications/X.app/Contents/Resources/ApplicationIcon.icns').includes('G-15'));
   assert.ok(ids('hermes cron rm probe-1').includes('G-14'));
   assert.ok(ids('nohup ./wait.sh &').includes('G-12'));
   assert.ok(ids('const t = row.createdAt.slice(0, 16)').includes('G-02'));
@@ -69,13 +68,11 @@ test('典型命令命中对应的坑', () => {
   assert.ok(ids('struct AlertSettings: Codable, Equatable {').includes('G-39'));
   assert.ok(ids('let s = try? JSONDecoder().decode(Alerts.self, from: data)').includes('G-39'));
   assert.ok(ids("cp src/relay.rs /w/relay.rs.bak && sed -i '' 's/queue(/leave(/' src/relay.rs && cargo test -p host; cp /w/relay.rs.bak src/relay.rs").includes('G-40'));
-  assert.ok(ids('git checkout -- src/crates/host/src/relay.rs').includes('G-40'));
   assert.ok(ids('try FileManager.default.removeItem(at: staging)').includes('G-41'));
   assert.ok(ids('shutil.rmtree(staging)').includes('G-41'));
   assert.ok(ids(`ps eww -o command= -p 1551 | tr ' ' '\\n' | grep -i -E "session|local_|CLAUDE"`).includes('G-42'));
   assert.ok(ids('cat /proc/1/environ').includes('G-42'));
   assert.ok(ids("const OWNER_OPEN_ID = 'ou_77e9a1b2c3d4';").includes('G-43'));
-  assert.ok(ids('lark-cli im +messages-send --receive-id-type open_id').includes('G-43'));
   assert.ok(ids("import '@fontsource/geist-sans/400.css';").includes('G-44'));
 });
 
@@ -116,21 +113,21 @@ test('作为 hook 真跑：同一会话同一条只提醒一次，并记一行�
       encoding: 'utf8',
       env: { ...process.env, AGENT_KIT_STATE_DIR: dir },
     });
-  const first = run('/usr/libexec/PlistBuddy -c "Print :Label" a.plist');
+  const first = run('launchctl bootout gui/501/com.x');
   assert.equal(first.status, 0);
   const ctx = JSON.parse(first.stdout).hookSpecificOutput;
   assert.equal(ctx.hookEventName, 'PreToolUse');
-  assert.match(ctx.additionalContext, /G-06/);
+  assert.match(ctx.additionalContext, /G-18/);
   assert.equal(ctx.permissionDecision, undefined, '只提醒，不做放行或拦截的决定');
-  const second = run('PlistBuddy -c "Print :Program" b.plist');
+  const second = run('launchctl bootout gui/501/com.y');
   assert.equal(second.stdout, '', '同一会话第二次不再提醒');
   const log = fs.readFileSync(path.join(dir, 'lessons-hits.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   assert.ok(fs.existsSync(path.join(dir, 'remind-sessions')), '去重记录放在状态目录，不放 /tmp');
   assert.equal(log.length, 2);
   assert.deepEqual(log[1].reminded, []);
   // M3：日志记下是哪个触发词命中的（瘦身提案 M3），只记触发词本身，不记命令内容
-  assert.deepEqual(log[0].words, { 'G-06': ['PlistBuddy'] });
-  assert.ok(!JSON.stringify(log).includes('Print :Label'));
+  assert.deepEqual(log[0].words, { 'G-18': ['launchctl bootout'] });
+  assert.ok(!JSON.stringify(log).includes('com.x'));
   assert.equal(run('git status').stdout, '');
 });
 
@@ -187,9 +184,8 @@ test('「并入」的条目：状态是并入，记下并到哪条，没有触�
 
 test('真实 LESSONS 按瘦身提案调整后的效果', () => {
   const real = input => findHits(lessons, input).map(h => h.entry.id);
-  // S1 G-03：跑脚本不提醒，改脚本提醒
+  // S1 G-03：跑脚本不提醒（2026-11-27 起改脚本也不提醒，见下一个测试）
   assert.ok(!real(bash('python3 -B hermes/scripts/health_check.py')).includes('G-03'));
-  assert.ok(real(write('/w/repo/scripts/release.sh', 'echo hi')).includes('G-03'));
   // S2 G-10：飞书不再触发
   assert.ok(!real(bash('lark-cli feishu docs +fetch x')).includes('G-10'));
   // S3 G-04：worktree 里 git add -A 不提醒，主目录提醒；并进来的 CARGO_TARGET_DIR 在 worktree 里也提醒
@@ -199,9 +195,8 @@ test('真实 LESSONS 按瘦身提案调整后的效果', () => {
   // S4 G-05：查看 launchd 不提醒，写 plist 提醒
   assert.ok(!real(bash('launchctl list | grep hermes')).includes('G-05'));
   assert.ok(real(write('/Users/n/Library/LaunchAgents/com.x.plist', '<plist/>')).includes('G-05'));
-  // S5 G-15：正常打包签名不提醒；并进来的缓存头照常提醒
+  // S5 G-15：正常打包签名不提醒（2026-11-27 起整条只查，见下一个测试）
   assert.ok(!real(bash('codesign --force --sign - build/Postpane.app')).includes('G-15'));
-  assert.ok(real(write('/w/repo/server.mjs', "res.setHeader('Cache-Control', 'no-cache')")).includes('G-15'));
   // S8 G-14：只认删除类子命令
   assert.ok(!real(bash('hermes cron list')).includes('G-14'));
   for (const sub of ['remove', 'rm', 'delete']) assert.ok(real(bash(`hermes cron ${sub} probe-1`)).includes('G-14'), sub);
@@ -212,4 +207,42 @@ test('真实 LESSONS 按瘦身提案调整后的效果', () => {
     assert.equal(e.mergedInto, to, from);
   }
   assert.ok(real(bash('git -C repo config core.hooksPath scripts/hooks')).includes('G-46'), 'G-47 的触发词并进 G-46');
+});
+
+test('2026-11-27 批阅单第 7 项（#135）：五条只查、G-40 和 G-43 收窄', () => {
+  const real = input => findHits(lessons, input).map(h => h.entry.id);
+  // 只查：触发改「无」，条目留着、升级行写依据
+  for (const id of ['G-03', 'G-06', 'G-15', 'G-21']) {
+    const e = lessons.find(x => x.id === id);
+    assert.deepEqual(e.triggers, [], id);
+    assert.ok(e.title && e.line, `${id} 的条目留着`);
+  }
+  assert.ok(!real(write('/w/repo/scripts/release.sh', 'echo hi')).includes('G-03'));
+  assert.ok(!real(bash('/usr/libexec/PlistBuddy -c "Print :x" a.plist')).includes('G-06'));
+  assert.ok(!real(write('/w/repo/server.mjs', "res.setHeader('Cache-Control', 'no-cache')")).includes('G-15'));
+  assert.ok(!real(bash('open "https://applink.feishu.cn/client/chat/open?openChatId=oc_1"')).includes('G-21'));
+  assert.equal(lessons.find(x => x.id === 'G-03').level, '机检');
+  const g03 = LESSONS_TEXT.split('\n## ').find(b => b.startsWith('G-03 '));
+  assert.match(g03, /- 升级：〔机检〕部分升级（2026-11-27 批阅单第 7 项/);
+  assert.doesNotMatch(g03.split('此前：')[0], /multi-agent、/, '覆盖名单里不再单列 multi-agent');
+  // G-40：改了、测了、又还原写在一条命令里才提醒。样本取自装后 6 天的真实命令（disk-slim、postpane、digiworld）
+  for (const c of [
+    "cp $F \"$EV/Cleaner.swift.orig\" && { sed -i '' 's/^ persist()$/ \\/\\/ persist()/' $F; scripts/test.sh --filter CleanerJournalTests > \"$EV/red.txt\" 2>&1; cp \"$EV/Cleaner.swift.orig\" $F; }",
+    "sed -i '' 's/a/b/' $F; scripts/test.sh 2>&1 | tail -5; sed -i '' 's/b/a/' $F",
+    "sed -i '' 's/a/b/' background.js && node --test test/background.test.mjs | grep fail; git checkout -- background.js",
+    "sed -i '' 's/a/b/' src/x.ts; npm run test; git restore src/x.ts",
+    "cp src/relay.rs /w/relay.rs.bak && sed -i '' 's/queue(/leave(/' src/relay.rs && cargo test -p host; cp /w/relay.rs.bak src/relay.rs",
+  ])
+    assert.ok(real(bash(c)).includes('G-40'), c);
+  for (const c of [
+    "sed -i '' 's/a/b/' tests/v3-export.test.mjs && node --test tests/*.test.mjs 2>&1 | grep -E '^ℹ (pass|fail)'",
+    "sed -i '' '11s/x/y/' CURRENT.md && node --test tests/*.test.mjs && node scripts/check-rules.mjs",
+    "sed -i '' 's/a/b/' x.js && sed -i '' 's/c/d/' y.test.mjs",
+    'git checkout -- src/crates/host/src/relay.rs',
+  ])
+    assert.ok(!real(bash(c)).includes('G-40'), c);
+  assert.ok(real(bash("echo '验红：去掉 persist()'")).includes('G-40'), '验红一词照旧');
+  // G-43：只认写死的 ou_ 字面量
+  assert.ok(real(write('/w/repo/a.mjs', "const OWNER_OPEN_ID = 'ou_77e9a1b2c3d4';")).includes('G-43'));
+  assert.ok(!real(bash('lark-cli im +messages-send --receive-id-type open_id')).includes('G-43'));
 });
