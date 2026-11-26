@@ -433,7 +433,8 @@ function checkRepoHooks({ config, env, home, run, dir }) {
     worktrees(repo, run).forEach((wt, i) => {
       const rel = path.relative(fs.realpathSync(repo), fs.realpathSync(wt.path));
       const label = i === 0 ? path.basename(repo) : `${path.basename(repo)} 的 worktree ${rel.startsWith('..') ? wt.path : rel}（${wt.branch}）`;
-      const hp = run('git', ['-C', wt.path, 'config', 'core.hooksPath']).stdout.trim();
+      // --path：和 git 自己一样展开 ~/（#141 审查）
+      const hp = run('git', ['-C', wt.path, 'config', '--path', 'core.hooksPath']).stdout.trim();
       if (!hp) {
         // 带钩子却没设：只看主检出，worktree 跟着主仓库的配置走
         if (i === 0 && GIT_HOOKS.some(h => fs.existsSync(path.join(wt.path, 'scripts', 'hooks', h))))
@@ -459,8 +460,9 @@ function checkRepoHooks({ config, env, home, run, dir }) {
   const rt = path.join(dir, 'runtime', 'git-hooks');
   const missing = ['pre-push', 'commit-msg', 'pre-push.mjs', 'commit-msg.mjs', 'check-rules.mjs', 'config.mjs'].filter(f => !fs.existsSync(path.join(rt, f)));
   const rtNotExec = GIT_HOOKS.filter(f => !missing.includes(f) && !(fs.statSync(path.join(rt, f)).mode & 0o111));
+  // 有仓库在用转发时才是 ✗（它们的推送、提交真会被拦下）；还没有仓库用转发时只提醒，免得体检一直报 ✗ 被当成噪音（#141 审查）
   if (missing.length || rtNotExec.length)
-    fail.unshift(`运行目录 ${rt} ${missing.length ? `缺 ${missing.join('、')}` : `里 ${rtNotExec.join('、')} 没有可执行位`}：转发到这里的仓库推送、提交都会被拦下。装法：在 agent-kit 主目录、main 上跑 node tools/install.mjs --apply`);
+    (forwarders ? fail : warn).unshift(`运行目录 ${rt} ${missing.length ? `缺 ${missing.join('、')}` : `里 ${rtNotExec.join('、')} 没有可执行位`}：${forwarders ? `转发到这里的 ${forwarders} 个钩子推送、提交都会被拦下` : '还没有仓库用转发，换上转发前要装好'}。装法：在 agent-kit 主目录、main 上跑 node tools/install.mjs --apply`);
   const results = [];
   const status = fail.length ? 'fail' : warn.length ? 'warn' : 'ok';
   results.push({
@@ -480,23 +482,41 @@ function checkCiRefs(repos, run) {
     const wf = path.join(repo, '.github', 'workflows');
     if (!fs.existsSync(wf)) continue;
     for (const f of fs.readdirSync(wf).filter(f => /\.ya?ml$/.test(f))) {
-      const text = readText(path.join(wf, f)) || '';
-      const m = text.match(/repository:\s*['"]?[\w.-]+\/agent-kit['"]?\s*\n\s*ref:\s*['"]?([\w./-]+)/);
-      if (m) used.push({ repo: path.basename(repo), file: `.github/workflows/${f}`, ref: m[1] });
+      for (const ref of agentKitRefs(readText(path.join(wf, f)) || '')) used.push({ repo: path.basename(repo), file: `.github/workflows/${f}`, ref });
     }
   }
   if (!used.length) return null;
   const name = 'CI 用的共用规则检查版本';
+  const noRef = used.filter(u => !u.ref);
   const files = ['git-hooks/check-rules.mjs', 'git-hooks/config.mjs'];
   const stale = [];
-  for (const u of used) {
+  for (const u of used.filter(u => u.ref)) {
     const diff = files.filter(f => {
       const r = run('git', ['-C', KIT, 'show', `${u.ref}:${f}`]);
       return r.code !== 0 || r.stdout !== readText(path.join(KIT, f));
     });
     if (diff.length) stale.push(`${u.repo}（${u.file}）用 agent-kit ${u.ref}：${diff.join('、')} 和本仓库当前的不一样（取不到也算）。本机推送前查的和 CI 查的不是同一版：给 agent-kit 打新标签，改这个仓库 CI 的 ref`);
   }
+  for (const u of noRef) stale.push(`${u.repo}（${u.file}）检出 agent-kit 没写 ref：用的是默认分支的最新版，本机推送前查的和 CI 查的对不上时看不出来。写成固定标签`);
   return stale.length ? { name, status: 'warn', detail: stale } : { name, status: 'ok', detail: [`${used.map(u => `${u.repo} 用 ${u.ref}`).join('、')}，和本仓库当前的共用实现一致`] };
+}
+
+// workflow 里检出 agent-kit 的每一步的 ref（没写 ref 的给 null）。同一步 with: 里键的顺序随意，中间夹别的键也认（#141 审查）
+export function agentKitRefs(text) {
+  const lines = text.split('\n');
+  const indent = l => l.match(/^\s*/)[0].length;
+  const refs = [];
+  lines.forEach((l, i) => {
+    if (!/^\s*repository:\s*['"]?[\w.-]+\/agent-kit['"]?\s*(#.*)?$/.test(l)) return;
+    const n = indent(l);
+    let a = i;
+    let b = i;
+    while (a > 0 && lines[a - 1].trim() && indent(lines[a - 1]) === n) a -= 1;
+    while (b < lines.length - 1 && lines[b + 1].trim() && indent(lines[b + 1]) === n) b += 1;
+    const ref = lines.slice(a, b + 1).map(x => x.match(/^\s*ref:\s*['"]?([\w./-]+)/)).find(Boolean);
+    refs.push(ref ? ref[1] : null);
+  });
+  return refs;
 }
 
 export function runDoctor(deps = {}) {

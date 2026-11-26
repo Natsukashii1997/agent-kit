@@ -233,7 +233,16 @@ test('仓库钩子查真生效（#133）：目录不在、不能执行报 ✗，
 
   // 运行目录里没有共用实现：转发仓库推送、提交都会被拦下
   const bare = doctor(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-')));
-  assert.match(bare.detail[0], /运行目录 .*runtime\/git-hooks 缺 pre-push、commit-msg、pre-push\.mjs.*node tools\/install\.mjs --apply/);
+  assert.match(bare.detail[0], /运行目录 .*runtime\/git-hooks 缺 pre-push、commit-msg、pre-push\.mjs.*转发到这里的 6 个钩子推送、提交都会被拦下.*node tools\/install\.mjs --apply/);
+
+  // core.hooksPath 写成 ~/ 开头：git 自己会展开，doctor 也要展开，不能误报「没有这个目录」（#141 审查）
+  const tilde = repo('波浪线', { hooks: false });
+  const hooksHome = fs.mkdtempSync(path.join(home, 'githooks-'));
+  fs.writeFileSync(path.join(hooksHome, 'commit-msg'), '#!/bin/sh\n', { mode: 0o755 });
+  git(tilde, 'config', 'core.hooksPath', `~/${path.basename(hooksHome)}`);
+  const tildeRun = (cmd, args, opts) => realRun(cmd, args, { ...opts, env: { ...(opts?.env || {}), HOME: home } });
+  assert.doesNotMatch(doctor(dir, tildeRun).detail.join('\n'), /波浪线：.*没有那个目录/);
+  fs.rmSync(tilde, { recursive: true, force: true });
 
   // 都修好：只剩转发和冻结的副本
   for (const name of ['目录没了', '没设', '不能执行', '副本', '停用']) fs.rmSync(path.join(work, name), { recursive: true, force: true });
@@ -254,6 +263,20 @@ test('仓库钩子查真生效（#133）：目录不在、不能执行报 ✗，
   const stale = ciCheck(withTag);
   assert.equal(stale.status, 'warn');
   assert.match(stale.detail[0], /CI仓库（\.github\/workflows\/check\.yml）用 agent-kit ak-no-such-tag：git-hooks\/check-rules\.mjs、git-hooks\/config\.mjs 和本仓库当前的不一样/);
+  // with: 里键的顺序随意、中间夹别的键也认；没写 ref 的报 ⚠（#141 审查）
+  fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), 'steps:\n  - uses: actions/checkout@v4\n    with:\n      ref: ak-same\n      token: x\n      repository: Natsukashii1997/agent-kit\n      path: .agent-kit\n');
+  assert.equal(ciCheck(withTag).status, 'ok');
+  fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), 'steps:\n  - uses: actions/checkout@v4\n    with:\n      repository: Natsukashii1997/agent-kit\n      path: .agent-kit\n  - run: echo\n    with:\n      ref: 别的步骤的\n');
+  assert.match(ciCheck(withTag).detail.join('\n'), /检出 agent-kit 没写 ref/);
+});
+
+test('仓库钩子：还没有仓库用转发时，运行目录缺共用实现只报 ⚠，不报 ✗（#141 审查）', () => {
+  const home = fakeHome();
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-work-'));
+  spawnSync('git', ['init', '-q', path.join(work, '不带钩子')]);
+  const r = byName(runDoctor({ home, env: {}, dir: fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-')), run: realRun, config: { workRoot: work, projectsFile: path.join(work, '没有.json') } }), '仓库钩子生效');
+  assert.equal(r.status, 'warn');
+  assert.match(r.detail[0], /还没有仓库用转发，换上转发前要装好/);
 });
 
 test('近 7 天坑提醒：分开数真正提醒和关键词匹配，按提醒次数排（瘦身提案 M4）', () => {

@@ -267,8 +267,11 @@ export function branchProblem(kit = KIT) {
   return null;
 }
 
-export function copyRuntime(dest, kit = KIT) {
+// 先拷到旁边的临时目录，再两次改名换上去：各仓库的转发随时可能在读 runtime/git-hooks，先删后拷的那一下会把提交、推送误拦（#141 审查）
+export function copyRuntime(final, kit = KIT) {
   const hooks = path.join(kit, 'hooks');
+  const dest = `${final}.new-${process.pid}`;
+  const old = `${final}.old-${process.pid}`;
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(dest, { recursive: true });
   // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
@@ -278,6 +281,16 @@ export function copyRuntime(dest, kit = KIT) {
   const gitHooks = path.join(kit, 'git-hooks');
   fs.cpSync(gitHooks, path.join(dest, 'git-hooks'), { recursive: true, filter: src => !path.relative(gitHooks, src).split(path.sep).some(p => p.startsWith('.')) });
   for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.chmodSync(path.join(dest, 'git-hooks', f), 0o755);
+  fs.rmSync(old, { recursive: true, force: true });
+  if (fs.existsSync(final)) fs.renameSync(final, old);
+  fs.renameSync(dest, final);
+  fs.rmSync(old, { recursive: true, force: true });
+}
+
+// 卸载：去掉 runtime/ 里 agent-kit 的 hook 和 LESSONS，留下 git-hooks/。各仓库的转发还指着它，删了连普通提交都会被拦下（#141 审查）
+export function removeRuntimeKeepGitHooks(runtime) {
+  if (!fs.existsSync(runtime)) return;
+  for (const f of fs.readdirSync(runtime)) if (f !== 'git-hooks') fs.rmSync(path.join(runtime, f), { recursive: true, force: true });
 }
 
 // 坑提醒的规则（LESSONS.md 的「触发」行和 lessons-remind.mjs）上次真正变化的时间，doctor 按它切开「近 7 天坑提醒」，
@@ -408,7 +421,10 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
   }
   if (remove) {
     if (!doClaude || !doCodex) plan.push(`只卸了一边，${runtime} 保留给另一边用。`);
-    else fs.rmSync(runtime, { recursive: true, force: true });
+    else {
+      removeRuntimeKeepGitHooks(runtime);
+      plan.push(`共用 git 钩子 ${path.join(runtime, 'git-hooks')} 留着：各仓库 scripts/hooks/ 的转发还指着它，删了这些仓库连普通提交都会被拦下。要彻底去掉，先把那些仓库的 core.hooksPath 改回去（git -C <仓库> config --unset core.hooksPath），再删这个目录。`);
+    }
     if (nextManifest.claude) fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
     else fs.rmSync(manifestFile, { force: true });
   } else {

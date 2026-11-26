@@ -148,7 +148,10 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.ok(fs.existsSync(path.join(handoffDir, 'config.json')), '卸载不删上下文提醒配置');
   assert.ok(!fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
   assert.deepEqual(fs.readdirSync(path.join(home, '.codex', 'rules')), [], '规则目录里不留备份');
-  assert.ok(!fs.existsSync(path.join(state, 'runtime')));
+  // 共用 git 钩子留着：各仓库的转发还指着它，删了那些仓库连普通提交都会被拦下（#141 审查）
+  assert.deepEqual(fs.readdirSync(path.join(state, 'runtime')), ['git-hooks']);
+  assert.ok(fs.existsSync(path.join(state, 'runtime', 'git-hooks', 'pre-push')));
+  assert.ok(!fs.readdirSync(state).some(f => /^runtime\.(new|old)-/.test(f)), '重装用的临时目录不留下');
   assert.ok(!fs.existsSync(path.join(state, 'install-manifest.json')));
 });
 

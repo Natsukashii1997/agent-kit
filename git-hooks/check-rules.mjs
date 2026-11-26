@@ -25,7 +25,44 @@ const ORIGIN_OK = /headers\s*(?:\.\s*(?:origin|host)\b|\[\s*['"](?:origin|host)[
 // set -u / set -eu / set -euo pipefail 之类（G-08）
 const SET_U = /^\s*set\s+-[a-z]*u[a-z]*\b/m;
 // [ -n "$X" ]、[[ -z $X ]]：判断可选开关是否设置，却没写 ${X:-}
-const OPTVAR = /\[\[?\s+-[nz]\s+"?\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))"?/;
+const OPTVAR = /\[\[?\s+-[nz]\s+"?\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))"?/g;
+const NAME = /^[A-Za-z_]\w*$/;
+
+// 脚本自己赋过值的变量（不是可选开关，G-08 不报；agent-autoloop 带回，#141 审查后收紧）：
+// 命令开头的 X=…（含 if ! X=$(…)、then / do 之后）、local / export / readonly / declare / typeset 后的每个 X=…、for X in、read 读进的变量。
+// 注释、echo 里的字符串、env X=1 cmd（只给子进程设）都不算。按 ; && || | ( { ! 和 if / then / do / while 等关键字切成一段段命令再认
+export function assignedNames(src) {
+  const names = new Set();
+  for (const raw of src.split('\n')) {
+    const line = raw.replace(/^\s*#.*$/, '').replace(/\s#.*$/, '');
+    for (const seg of line.split(/;|&&|\|\||\||\(|\)|\{|\}|!|\b(?:if|then|elif|else|do|while|until)\b/)) {
+      const t = seg.trim();
+      const decl = t.match(/^(?:local|export|readonly|declare|typeset)((?:\s+-\w+)*)\s+(.*)$/);
+      if (decl) for (const m of decl[2].matchAll(/(?:^|\s)([A-Za-z_]\w*)=/g)) names.add(m[1]);
+      const lead = t.match(/^([A-Za-z_]\w*)=/);
+      if (lead) names.add(lead[1]);
+      const loop = t.match(/^(?:for|select)\s+([A-Za-z_]\w*)\s+in\b/);
+      if (loop) names.add(loop[1]);
+      const read = t.match(/^(?:[A-Za-z_]\w*=\S*\s+)*read\b(.*)$/);
+      if (!read) continue;
+      const words = read[1].trim().split(/\s+/).filter(Boolean);
+      for (let i = 0; i < words.length; i++) {
+        const w = words[i];
+        if (w.startsWith('-')) {
+          // 这几个选项后面跟一个参数；-a 的参数是数组名，也算赋值
+          if (/^-[adinNptu]$/.test(w)) {
+            i += 1;
+            if (w === '-a' && NAME.test(words[i] || '')) names.add(words[i]);
+          }
+          continue;
+        }
+        if (!NAME.test(w)) break;
+        names.add(w);
+      }
+    }
+  }
+  return names;
+}
 // LESSONS「升级」行开头的层级词，口径同全局 LESSONS「怎么升级」（hooks/lessons-remind.mjs 的 LEVELS）
 const LEVELS = ['结构', '机检', '体检', '文字', '提醒'];
 // 改动文件数到这个数就要写改前改后对照
@@ -61,12 +98,11 @@ export function checkRules(root, config = readConfig(root, Object.keys(RULES)).c
   for (const file of config.scanSh.flatMap(dir => files(path.join(root, dir), ['.sh'], config.skipDirs))) {
     const src = fs.readFileSync(file, 'utf8');
     if (!SET_U.test(src)) continue;
+    const assigned = assignedNames(src);
     src.split('\n').forEach((text, i) => {
-      const m = text.match(OPTVAR);
-      if (!m || text.trimStart().startsWith('#')) return;
-      // 同一文件里赋过值的（x=、local x=、! x=$(...)）是脚本自己的变量，不是可选开关（agent-autoloop 带回）
-      if (new RegExp(`(?:^|[\\s!;&|(])(?:local\\s+)?${m[1] ?? m[2]}=`, 'm').test(src)) return;
-      hit(file, i + 1, 'optvar', text);
+      if (text.trimStart().startsWith('#')) return;
+      // 同一行有几个判断时逐个查，同一行只报一次
+      if ([...text.matchAll(OPTVAR)].some(m => !assigned.has(m[1] ?? m[2]))) hit(file, i + 1, 'optvar', text);
     });
   }
   const pkgFile = path.join(root, 'package.json');

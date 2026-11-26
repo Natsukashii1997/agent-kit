@@ -38,6 +38,25 @@ test('G-08：同一文件里赋过值的变量是脚本自己的，不当可选�
   assert.deepEqual(kinds(root), ['scripts/smoke.sh:6 optvar']);
 });
 
+test('G-08：注释、字符串、env X=1 cmd 里的「X=」不算赋过值；for、read 读进的变量不报；同一行几个判断逐个查（#141 审查）', t => {
+  const { root, write } = tempRoot(t);
+  write('scripts/a.sh', [
+    'set -eu',
+    '# 用法：DRY_RUN=1 ./a.sh',
+    'if [ -n "$DRY_RUN" ]; then echo dry; fi',
+    'echo "设 DEBUG=1 看细节"',
+    '[[ -n $DEBUG ]] && echo debug',
+    'env FOO=1 node x.mjs',
+    '[ -z "$FOO" ] && echo foo',
+    'for f in *.txt; do [ -n "$f" ] && echo "$f"; done',
+    'while IFS= read -r line; do [ -z "$line" ] && continue; done < list',
+    'read -r -a parts first <<< "a b"; [ -n "$first" ] && [ -n "$parts" ]',
+    'export A=1 B=2; [ -n "$B" ]',
+    '[ -n "${A:-}" ] && [ -n "$OTHER" ]',
+  ].join('\n') + '\n');
+  assert.deepEqual(kinds(root), ['scripts/a.sh:3 optvar', 'scripts/a.sh:5 optvar', 'scripts/a.sh:7 optvar', 'scripts/a.sh:12 optvar']);
+});
+
 test('各仓库的差异写在 scripts/hooks.json：扫哪些目录、扩展名、跳过的目录、依赖白名单、关掉的规则', t => {
   const { root, write } = tempRoot(t);
   write('host/a.ts', 'show(item.createdAt.slice(0, 16));\n');
