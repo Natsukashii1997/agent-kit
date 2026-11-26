@@ -48,6 +48,7 @@ test('别的会话派来的任务（委派）不提醒：里面提到思维评�
   assert.equal(sig('Please carry out this task from my Orca coordinator by following the brief I pasted below.\n思维评审'), null, 'Orca 协调器派单');
   // 用户自己用这句英文开头，不是派单（#135 审查 P2-03）
   assert.equal(sig('Please carry out this task: 思维评审一下这个方案'), 'asked');
+  assert.equal(sig('Please carry out this task from my project coordinator: 思维评审一下这个方案'), 'asked', '协调器只认白名单里的 Orca');
 });
 
 test('后台事件、会话间通知、斜杠命令不提醒', () => {
