@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 第 3 件（含第 5 件的比对）：agent-kit 自检。只查 agent-kit 自己装进本机的东西和它管的约定：
 // 权限规则与 hook 装没装、能不能真跑；两份全局指令是否一致；自动记忆状态；坑提醒命中；可选查各仓库本地 main 有没有没推的提交；
-// 带 scripts/hooks 的仓库有没有装 core.hooksPath。
+// 各仓库的 git 钩子真生效没有（设了 core.hooksPath 的仓库和 worktree，共用实现装没装，CI 用的版本落后没有）。
 // launchd、Hermes 定时任务、crontab 的体检归 my-skills 的 automation-checkup（my-skills#30），这里不重复做。
 //   node tools/doctor.mjs              体检，结果打在屏幕上，同时存一份报告
 //   node tools/doctor.mjs --json       输出 JSON（给定时任务或别的脚本用）
@@ -160,7 +160,7 @@ function checkHooks({ home, run, env, dir }) {
   const runtime = path.join(dir, 'runtime');
   let stale = [];
   if (hasGuard || hasRemind) {
-    const files = ['LESSONS.md', ...fs.readdirSync(path.join(KIT, 'hooks'), { recursive: true }).filter(f => (f.endsWith('.mjs') || f.endsWith('.py')) && !f.includes('__pycache__')).map(f => path.join('hooks', f))];
+    const files = ['LESSONS.md', ...['hooks', 'git-hooks'].flatMap(d => fs.readdirSync(path.join(KIT, d), { recursive: true }).filter(f => (f.endsWith('.mjs') || f.endsWith('.py') || f === 'pre-push' || f === 'commit-msg' || f.endsWith(`${path.sep}pre-push`) || f.endsWith(`${path.sep}commit-msg`)) && !f.includes('__pycache__')).map(f => path.join(d, f)))];
     stale = files.filter(f => readText(path.join(KIT, f)) !== readText(path.join(runtime, f)));
     results.push(
       stale.length
@@ -264,37 +264,52 @@ function checkAutoMemory({ home }) {
 
 // 分开数「真正提醒」和「关键词匹配」（瘦身提案 M4）：同一会话同一条只提醒一次，匹配数会把常见词放大几十倍。
 // 按提醒次数排，每条写「提醒 X 次（Y 个会话）/ 匹配 Z 次」。
-function checkLessonHits({ now, dir }) {
-  const text = readText(path.join(dir, 'lessons-hits.jsonl'));
-  const since = now - 7 * 864e5;
+// 7 天窗口跨过「坑提醒规则改了之后的重装」（install-manifest.json 的 remindChangedAt）时按它切开：主数只算改后的，
+// 改前的只给一个每会话条数作对照。不切的话两套规则的数混在一起，量不出改了有没有用（#133，瘦身装机后报 3.9、实测 3.1）。
+function tallyHits(rows) {
   const by = {};
   const sessions = new Set();
-  for (const line of (text || '').split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      if (Date.parse(row.time) < since) continue;
-      sessions.add(row.session);
-      for (const id of row.ids || []) (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() }).matched += 1;
-      for (const id of row.reminded || []) {
-        const e = (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() });
-        e.reminded += 1;
-        e.sessions.add(row.session);
-      }
-    } catch {}
+  for (const row of rows) {
+    sessions.add(row.session);
+    for (const id of row.ids || []) (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() }).matched += 1;
+    for (const id of row.reminded || []) {
+      const e = (by[id] ||= { matched: 0, reminded: 0, sessions: new Set() });
+      e.reminded += 1;
+      e.sessions.add(row.session);
+    }
   }
   const list = Object.entries(by).sort((x, y) => y[1].reminded - x[1].reminded || y[1].matched - x[1].matched);
   const total = list.reduce((n, [, e]) => n + e.reminded, 0);
-  return {
-    name: '近 7 天坑提醒',
-    status: 'info',
-    detail: list.length
-      ? [
-          `一共提醒 ${total} 次，${sessions.size} 个会话，平均每会话 ${(total / Math.max(sessions.size, 1)).toFixed(1)} 条`,
-          list.map(([id, e]) => `${id} 提醒 ${e.reminded} 次（${e.sessions.size} 个会话）/ 匹配 ${e.matched} 次`).join('、'),
-        ]
-      : ['没有命中（或 hook 还没装）'],
-  };
+  return { list, total, sessions: sessions.size, perSession: (total / Math.max(sessions.size, 1)).toFixed(1) };
+}
+
+function checkLessonHits({ now, dir }) {
+  const since = now - 7 * 864e5;
+  const rows = (readText(path.join(dir, 'lessons-hits.jsonl')) || '').split('\n').flatMap(line => {
+    try {
+      const row = JSON.parse(line);
+      const at = Date.parse(row.time);
+      return at >= since && at <= now ? [{ ...row, at }] : [];
+    } catch {
+      return [];
+    }
+  });
+  const manifest = jsonOr(readText(path.join(dir, 'install-manifest.json')));
+  // 旧版安装记录没有 remindChangedAt，退回上次安装时间（下次重装起就准了）
+  const changed = Date.parse(manifest.remindChangedAt || manifest.installedAt);
+  const cut = changed > since && changed <= now ? changed : null;
+  const after = tallyHits(cut ? rows.filter(r => r.at >= cut) : rows);
+  const name = '近 7 天坑提醒';
+  const day = ms => new Date(ms + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' '); // 北京时间
+  const head = cut ? `提醒规则 ${day(cut)} 重装后（${((now - cut) / 864e5).toFixed(1)} 天）：` : '';
+  const detail = after.list.length
+    ? [`${head}一共提醒 ${after.total} 次，${after.sessions} 个会话，平均每会话 ${after.perSession} 条`, after.list.map(([id, e]) => `${id} 提醒 ${e.reminded} 次（${e.sessions.size} 个会话）/ 匹配 ${e.matched} 次`).join('、')]
+    : [`${head}没有命中（或 hook 还没装）`];
+  if (cut) {
+    const before = tallyHits(rows.filter(r => r.at < cut));
+    if (before.sessions) detail.push(`重装前（同一窗口里的 ${((cut - since) / 864e5).toFixed(1)} 天，旧规则）：平均每会话 ${before.perSession} 条，只作对照`);
+  }
+  return { name, status: 'info', detail };
 }
 
 // thinking-review 三层分开看（#35）：钩子提醒了几个会话 → 其中几个调用了 skill → 几个真的发起了「思维评审｜」接力。
@@ -353,30 +368,135 @@ function checkRepos({ config, run }) {
   });
 }
 
-// 仓库钩子（复盘 P6，2026-11-20）：项目目录下带 scripts/hooks/pre-push 的仓库，本机要装 core.hooksPath=scripts/hooks，
-// 否则推送前检查、提交前检查悄悄不跑。只读，不替你装（装回由人决定：钩子有问题时会有意停用）。
-// 项目目录默认 ~/Documents/ChatGPT/个人/work，可用 doctor.json 的 workRoot 或 AGENT_KIT_WORK_ROOT 覆盖（同 weekly-review）
-function checkRepoHooks({ config, env, home, run }) {
-  const name = '仓库钩子已装';
+// 仓库钩子（复盘 P6 2026-11-20；只留一份 #133）：查的是真生效没有，不只是配置字符串。
+// - 项目目录下每个仓库的每个 worktree（git worktree list，含 .claude/worktrees 下的）：设了 core.hooksPath 的，
+//   这个检出里得有那个目录、目录里的钩子得能执行，否则推送前、提交前检查悄悄不跑 → ✗；带钩子却没设 → ⚠（有意停用时可忽略）。
+// - 转发找的共用实现（状态目录 runtime/git-hooks）不在 → ✗：所有转发仓库推送、提交都会被拦下。
+// - 冻结项目（digital-twin projects.json 里 category 为「冻结」）只报会坏事的（上面两条），不报「还是旧副本」。
+// 只读，不替你装。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 doctor.json 的 workRoot 或 AGENT_KIT_WORK_ROOT 覆盖（同 weekly-review）；
+// 名册默认 <项目目录>/digital-twin/projects.json，可用 doctor.json 的 projectsFile 覆盖。
+export const FORWARD_MARK = 'runtime/git-hooks/';
+const GIT_HOOKS = ['pre-push', 'commit-msg'];
+
+function frozenRepos(file, home) {
+  const data = jsonOr(readText(file), null);
+  if (!data) return { set: new Set(), note: `读不到名册 ${file}，冻结项目按普通仓库查` };
+  const expand = p => path.resolve(String(p || '').replace(/^~(?=\/|$)/, home));
+  return { set: new Set((data.projects || []).filter(p => p.category === '冻结').map(p => expand(p.path))) };
+}
+
+// git worktree list --porcelain → [{ path, branch }]，第一个是主检出；目录已经不在的跳过
+function worktrees(repo, run) {
+  const out = run('git', ['-C', repo, 'worktree', 'list', '--porcelain']);
+  if (out.code !== 0) return [{ path: repo, branch: '' }];
+  const list = [];
+  for (const block of out.stdout.split('\n\n')) {
+    const p = block.match(/^worktree (.+)$/m)?.[1];
+    if (p && fs.existsSync(p)) list.push({ path: p, branch: block.match(/^branch refs\/heads\/(.+)$/m)?.[1] || '（分离头）' });
+  }
+  return list.length ? list : [{ path: repo, branch: '' }];
+}
+
+export function inspectGitHooks(hooksDir) {
+  const hooks = GIT_HOOKS.filter(h => fs.existsSync(path.join(hooksDir, h)));
+  const notExec = hooks.filter(h => !(fs.statSync(path.join(hooksDir, h)).mode & 0o111));
+  const forward = hooks.filter(h => (readText(path.join(hooksDir, h)) || '').includes(FORWARD_MARK));
+  return { hooks, notExec, forward, copies: hooks.filter(h => !forward.includes(h)) };
+}
+
+function checkRepoHooks({ config, env, home, run, dir }) {
+  const name = '仓库钩子生效';
   const root = config.workRoot || env.AGENT_KIT_WORK_ROOT || path.join(home, 'Documents', 'ChatGPT', '个人', 'work');
   let entries = [];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory());
   } catch {
-    return { name, status: 'info', detail: [`没找到项目目录 ${root}，不查`] };
+    return [{ name, status: 'info', detail: [`没找到项目目录 ${root}，不查`] }];
   }
-  const repos = entries.map(e => path.join(root, e.name)).filter(r => fs.existsSync(path.join(r, 'scripts', 'hooks', 'pre-push')) && fs.existsSync(path.join(r, '.git')));
-  if (!repos.length) return { name, status: 'info', detail: [`${root} 下没有带 scripts/hooks 的仓库`] };
-  const bad = repos.map(r => ({ r, v: run('git', ['-C', r, 'config', 'core.hooksPath']).stdout.trim() })).filter(x => x.v !== 'scripts/hooks');
-  if (!bad.length) return { name, status: 'ok', detail: [`${repos.length} 个仓库都装了 core.hooksPath=scripts/hooks`] };
-  return {
+  const frozen = frozenRepos(config.projectsFile || path.join(root, 'digital-twin', 'projects.json'), home);
+  const fail = [];
+  const warn = [];
+  const notes = frozen.note ? [frozen.note] : [];
+  let checked = 0;
+  let forwarders = 0;
+  // 只认主仓库（.git 是目录）；项目目录里直接放着的 worktree（.git 是文件）由它的主仓库列出来
+  const repos = entries.map(e => path.join(root, e.name)).filter(r => {
+    try {
+      return fs.statSync(path.join(r, '.git')).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  for (const repo of repos) {
+    const isFrozen = frozen.set.has(path.resolve(repo));
+    const noDir = [];
+    worktrees(repo, run).forEach((wt, i) => {
+      const rel = path.relative(fs.realpathSync(repo), fs.realpathSync(wt.path));
+      const label = i === 0 ? path.basename(repo) : `${path.basename(repo)} 的 worktree ${rel.startsWith('..') ? wt.path : rel}（${wt.branch}）`;
+      const hp = run('git', ['-C', wt.path, 'config', 'core.hooksPath']).stdout.trim();
+      if (!hp) {
+        // 带钩子却没设：只看主检出，worktree 跟着主仓库的配置走
+        if (i === 0 && GIT_HOOKS.some(h => fs.existsSync(path.join(wt.path, 'scripts', 'hooks', h))))
+          warn.push(`${label}：带了 scripts/hooks 却没设 core.hooksPath，推送前、提交前检查不跑（有意停用时可忽略）。装：git -C "${wt.path}" config core.hooksPath scripts/hooks`);
+        return;
+      }
+      checked += 1;
+      const hooksDir = path.resolve(wt.path, hp);
+      if (hp === '/dev/null') return warn.push(`${label}：core.hooksPath 指向 /dev/null，钩子停用了（有意停用时可忽略）`);
+      if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) return noDir.push(i === 0 ? '主检出' : label.slice(path.basename(repo).length + ' 的 worktree '.length));
+      const h = inspectGitHooks(hooksDir);
+      if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 或 commit-msg，钩子不跑`);
+      if (h.notExec.length) fail.push(`${label}：${h.notExec.join('、')} 没有可执行位，git 会跳过它（chmod +x "${hooksDir}/${h.notExec[0]}"）`);
+      forwarders += h.forward.length;
+      if (i === 0 && !isFrozen && (h.copies.length || fs.existsSync(path.join(wt.path, 'scripts', 'check-rules.mjs'))))
+        warn.push(`${label}：${[...h.copies, ...(fs.existsSync(path.join(wt.path, 'scripts', 'check-rules.mjs')) ? ['scripts/check-rules.mjs'] : [])].join('、')} 还是仓库自己的副本，没换成转发到 agent-kit 共用实现（#133）`);
+    });
+    // 同一仓库里设了 core.hooksPath、检出里却没有那个目录的，合成一行：多是钩子进 main 之前开的旧 worktree，从那里推送、提交都不查
+    if (noDir.length)
+      fail.push(`${path.basename(repo)}：${noDir.length} 处检出设了 core.hooksPath，检出里却没有那个目录，钩子不跑：${noDir.slice(0, 3).join('、')}${noDir.length > 3 ? ` 等 ${noDir.length} 处` : ''}${noDir.includes('主检出') ? '' : '（都是 worktree：用完的可以清掉，还要用的先变基到 main）'}`);
+  }
+  // 共用实现：转发找的就是这几样
+  const rt = path.join(dir, 'runtime', 'git-hooks');
+  const missing = ['pre-push', 'commit-msg', 'pre-push.mjs', 'commit-msg.mjs', 'check-rules.mjs', 'config.mjs'].filter(f => !fs.existsSync(path.join(rt, f)));
+  const rtNotExec = GIT_HOOKS.filter(f => !missing.includes(f) && !(fs.statSync(path.join(rt, f)).mode & 0o111));
+  if (missing.length || rtNotExec.length)
+    fail.unshift(`运行目录 ${rt} ${missing.length ? `缺 ${missing.join('、')}` : `里 ${rtNotExec.join('、')} 没有可执行位`}：转发到这里的仓库推送、提交都会被拦下。装法：在 agent-kit 主目录、main 上跑 node tools/install.mjs --apply`);
+  const results = [];
+  const status = fail.length ? 'fail' : warn.length ? 'warn' : 'ok';
+  results.push({
     name,
-    status: 'warn',
-    detail: [
-      `${bad.length}/${repos.length} 个仓库带了钩子却没装，推送前、提交前检查不会跑（有意停用时可忽略）：`,
-      ...bad.map(({ r, v }) => `  ${path.basename(r)}：${v ? `指向 ${v}` : '没装'}，装：git -C "${r}" config core.hooksPath scripts/hooks`),
-    ],
-  };
+    status,
+    detail: status === 'ok' ? [`${checked} 处设了 core.hooksPath 的检出都能跑，其中转发 ${forwarders} 个；共用实现在 ${rt}`, ...notes] : [...fail, ...warn, ...notes],
+  });
+  const ci = checkCiRefs(entries.map(e => path.join(root, e.name)).filter(r => !frozen.set.has(path.resolve(r))), run);
+  if (ci) results.push(ci);
+  return results;
+}
+
+// CI 上要跑规则检查的仓库检出 agent-kit 的固定标签（#133）。标签里的共用实现和本仓库当前的不一样时，本机推送前查的和 CI 查的不是同一版
+function checkCiRefs(repos, run) {
+  const used = [];
+  for (const repo of repos) {
+    const wf = path.join(repo, '.github', 'workflows');
+    if (!fs.existsSync(wf)) continue;
+    for (const f of fs.readdirSync(wf).filter(f => /\.ya?ml$/.test(f))) {
+      const text = readText(path.join(wf, f)) || '';
+      const m = text.match(/repository:\s*['"]?[\w.-]+\/agent-kit['"]?\s*\n\s*ref:\s*['"]?([\w./-]+)/);
+      if (m) used.push({ repo: path.basename(repo), file: `.github/workflows/${f}`, ref: m[1] });
+    }
+  }
+  if (!used.length) return null;
+  const name = 'CI 用的共用规则检查版本';
+  const files = ['git-hooks/check-rules.mjs', 'git-hooks/config.mjs'];
+  const stale = [];
+  for (const u of used) {
+    const diff = files.filter(f => {
+      const r = run('git', ['-C', KIT, 'show', `${u.ref}:${f}`]);
+      return r.code !== 0 || r.stdout !== readText(path.join(KIT, f));
+    });
+    if (diff.length) stale.push(`${u.repo}（${u.file}）用 agent-kit ${u.ref}：${diff.join('、')} 和本仓库当前的不一样（取不到也算）。本机推送前查的和 CI 查的不是同一版：给 agent-kit 打新标签，改这个仓库 CI 的 ref`);
+  }
+  return stale.length ? { name, status: 'warn', detail: stale } : { name, status: 'ok', detail: [`${used.map(u => `${u.repo} 用 ${u.ref}`).join('、')}，和本仓库当前的共用实现一致`] };
 }
 
 export function runDoctor(deps = {}) {
@@ -398,7 +518,7 @@ export function runDoctor(deps = {}) {
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
     ...checkRepos(ctx),
-    checkRepoHooks(ctx),
+    ...checkRepoHooks(ctx),
   ];
 }
 

@@ -1,0 +1,3 @@
+#!/bin/sh
+# 共用的推送前检查入口（运行目录里的这份由各仓库 scripts/hooks/pre-push 转发过来）。实现在同目录 pre-push.mjs。
+exec node "$(dirname "$0")/pre-push.mjs" "$@"

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -263,10 +263,35 @@ test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/wo
   fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', 'session_organize_once.py'), '');
   fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', '__pycache__', 'x.pyc'), '');
   fs.writeFileSync(path.join(kit, 'LESSONS.md'), '');
+  // 共用 git 钩子（#133）：整份复制，入口不管原来有没有可执行位都给上
+  fs.mkdirSync(path.join(kit, 'git-hooks', 'forward'), { recursive: true });
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg', 'pre-push.mjs']) fs.writeFileSync(path.join(kit, 'git-hooks', f), '', { mode: 0o644 });
+  fs.writeFileSync(path.join(kit, 'git-hooks', '.DS_Store'), '');
   const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-')), 'runtime');
   copyRuntime(dest, kit);
   assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs', 'session-organize-once', 'session-organize-once/session_organize_once.py']);
   assert.ok(fs.existsSync(path.join(dest, 'LESSONS.md')));
+  assert.deepEqual(fs.readdirSync(path.join(dest, 'git-hooks'), { recursive: true }).sort(), ['commit-msg', 'forward', 'forward/commit-msg', 'forward/pre-push', 'pre-push', 'pre-push.mjs']);
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) assert.equal(fs.statSync(path.join(dest, 'git-hooks', f)).mode & 0o777, 0o755, f);
+});
+
+test('坑提醒规则的变化时间（#133）：LESSONS.md 或 lessons-remind.mjs 和已装副本不同才更新，相同就沿用', () => {
+  const kit = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-'));
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-'));
+  for (const root of [kit, runtime]) {
+    fs.mkdirSync(path.join(root, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'LESSONS.md'), '- 触发：`/tmp/`\n');
+    fs.writeFileSync(path.join(root, 'hooks', 'lessons-remind.mjs'), 'v1');
+  }
+  const now = '2026-11-27T10:00:00.000Z';
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z', installedAt: '2026-11-26T00:00:00.000Z' }, now, kit), '2026-11-21T09:00:00.000Z', '没变就沿用');
+  assert.equal(remindChangedAt(runtime, { installedAt: '2026-11-26T00:00:00.000Z' }, now, kit), '2026-11-26T00:00:00.000Z', '旧记录没有这一项，退回上次安装时间');
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), '- 触发：无\n');
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z' }, now, kit), now, 'LESSONS 变了');
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), '- 触发：`/tmp/`\n');
+  fs.writeFileSync(path.join(kit, 'hooks', 'lessons-remind.mjs'), 'v2');
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z' }, now, kit), now, '提醒钩子变了');
+  assert.equal(remindChangedAt(path.join(runtime, '没有'), {}, now, kit), now, '第一次装');
 });
 
 test('上下文提醒（#105）：旧路径条目重装时换成 runtime 副本；配置和提醒记录从旧位置迁移，已有的不覆盖、旧目录不删', () => {

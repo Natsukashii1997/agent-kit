@@ -13,6 +13,8 @@
 // 上下文提醒钩子（#105）同样：配置和提醒记录放状态目录 context-handoff/，没有时从 ~/.claude/hooks/context-handoff/ 迁移。
 // 写之前把原文件备份到状态目录 backups/<时间>/；hook 脚本和 LESSONS.md 复制到状态目录 runtime/ 再指向那里，
 // 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
+// 各仓库共用的 git 钩子（agent-kit#133）也复制到 runtime/git-hooks/：各仓库 scripts/hooks/ 里的转发找的就是这里，
+// 不写任何设置文件；改了 git-hooks/ 同样要在 main 上重装，所有转发仓库一起生效。
 // 本次新增了哪些权限规则记在状态目录 install-manifest.json，卸载只删这些，你自己原有的同名规则不动。
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -224,6 +226,33 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   });
   fs.rmSync(ht, { recursive: true, force: true });
   if (h.status !== 0 || !String(h.stdout).includes('上下文提醒')) problems.push(`上下文提醒钩子没对 60% 的会话给出提醒（${python}，退出码 ${h.status}，${h.stderr || h.stdout}）`);
+  problems.push(...gitHooksSelfTest(base, node));
+  return problems;
+}
+
+// 各仓库共用的 git 钩子（#133）：入口有可执行位；commit-msg 拦下没写「同类：」的修复提交；规则检查抓到截取 ISO 时间
+export function gitHooksSelfTest(base = KIT, node = process.execPath) {
+  const dir = path.join(base, 'git-hooks');
+  const problems = [];
+  for (const f of ['pre-push', 'commit-msg']) {
+    try {
+      if (!(fs.statSync(path.join(dir, f)).mode & 0o111)) problems.push(`git-hooks/${f} 没有可执行位，git 会跳过它`);
+    } catch {
+      problems.push(`缺 git-hooks/${f}`);
+    }
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-git-hooks-'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'msg'), 'fix: 截断\n');
+    const c = spawnSync(node, [path.join(dir, 'commit-msg.mjs'), path.join(tmp, 'msg')], { encoding: 'utf8', timeout: 10000 });
+    if (c.status !== 1 || !String(c.stderr).includes('同类')) problems.push(`git-hooks/commit-msg.mjs 没拦下没写「同类：」的修复提交（退出码 ${c.status}，${c.stderr || c.stdout}）`);
+    fs.mkdirSync(path.join(tmp, 'src'));
+    fs.writeFileSync(path.join(tmp, 'src', 'a.js'), 'show(item.createdAt.slice(0, 16));\n');
+    const r = spawnSync(node, [path.join(dir, 'check-rules.mjs'), tmp], { encoding: 'utf8', timeout: 10000 });
+    if (r.status !== 1 || !String(r.stderr).includes('G-02')) problems.push(`git-hooks/check-rules.mjs 没抓到截取 ISO 时间（退出码 ${r.status}，${r.stderr || r.stdout}）`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
   return problems;
 }
 
@@ -233,8 +262,8 @@ export function branchProblem(kit = KIT) {
   const br = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (br.status !== 0) return '这个目录不是 git 仓库，认不出是不是 main 上的版本';
   if (br.stdout.trim() !== 'main') return `当前在 ${br.stdout.trim()} 分支上，不是 main`;
-  const dirty = git(['status', '--porcelain', '--', 'hooks', 'config', 'global', 'LESSONS.md']).stdout.trim();
-  if (dirty) return `hooks/、config/、global/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
+  const dirty = git(['status', '--porcelain', '--', 'hooks', 'git-hooks', 'config', 'global', 'LESSONS.md']).stdout.trim();
+  if (dirty) return `hooks/、git-hooks/、config/、global/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
   return null;
 }
 
@@ -245,6 +274,25 @@ export function copyRuntime(dest, kit = KIT) {
   // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
   fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.') || p === '__pycache__') });
   fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
+  // 各仓库共用的 git 钩子（#133）：两个入口显式给可执行位，不靠复制时带过去
+  const gitHooks = path.join(kit, 'git-hooks');
+  fs.cpSync(gitHooks, path.join(dest, 'git-hooks'), { recursive: true, filter: src => !path.relative(gitHooks, src).split(path.sep).some(p => p.startsWith('.')) });
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.chmodSync(path.join(dest, 'git-hooks', f), 0o755);
+}
+
+// 坑提醒的规则（LESSONS.md 的「触发」行和 lessons-remind.mjs）上次真正变化的时间，doctor 按它切开「近 7 天坑提醒」，
+// 免得把装机前后两套规则的提醒数混在一起算（#133）。和已装的副本一样就沿用旧时间；旧记录没有这一项时，退回上次安装时间
+export const REMIND_FILES = ['LESSONS.md', path.join('hooks', 'lessons-remind.mjs')];
+export function remindChangedAt(runtime, manifest, now, kit = KIT) {
+  const read = file => {
+    try {
+      return fs.readFileSync(file, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const changed = REMIND_FILES.some(f => read(path.join(kit, f)) !== read(path.join(runtime, f)));
+  return changed ? now : manifest.remindChangedAt || manifest.installedAt || now;
 }
 
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
@@ -276,8 +324,8 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       console.error(`自检没通过，什么都没改：\n- ${problems.join('\n- ')}`);
       return 1;
     }
-    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对写 plist 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通，上下文提醒钩子对 60% 的会话给出了提醒。');
-    plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里。`);
+    plan.push('自检通过：guard-git 拦下了强推 main，lessons-remind 对写 plist 给出了 G-05 提醒，skill-usage 能跑，thinking-review-nudge 对「思维评审」给出了提醒，bash-precheck 拦下了 rm 变量加通配符，首轮整理钩子用 Python 跑通，上下文提醒钩子对 60% 的会话给出了提醒，共用 git 钩子拦下了没写「同类：」的修复提交、规则检查抓到了截取 ISO 时间。');
+    plan.push(`hook 脚本和 LESSONS.md 复制到 ${runtime}，设置里指向那里；共用 git 钩子复制到 ${path.join(runtime, 'git-hooks')}，各仓库 scripts/hooks/ 的转发找的是这里。`);
   }
 
   const writes = [];
@@ -368,9 +416,11 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
       ensureOrganizeConfig(sd, home, { write: true });
       ensureHandoffConfig(sd, home, { write: true });
     }
+    const now = new Date().toISOString();
+    nextManifest.remindChangedAt = remindChangedAt(runtime, manifest, now);
     copyRuntime(runtime);
     nextManifest.kit = KIT;
-    nextManifest.installedAt = new Date().toISOString();
+    nextManifest.installedAt = now;
     fs.mkdirSync(sd, { recursive: true });
     fs.writeFileSync(manifestFile, `${JSON.stringify(nextManifest, null, 2)}\n`);
   }
