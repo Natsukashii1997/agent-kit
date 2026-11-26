@@ -227,13 +227,13 @@ test('近 7 天坑提醒：分开数真正提醒和关键词匹配，按提醒�
   assert.equal(r.detail[1], 'G-04 提醒 2 次（2 个会话）/ 匹配 2 次、G-03 提醒 1 次（1 个会话）/ 匹配 4 次');
 });
 
-test('额度守护：没装给 ·；按时在跑给 ✓；超时或有失败给 ⚠', () => {
+test('会话续跑巡检：没装给 ·；按时在跑给 ✓；超时或有失败给 ⚠', () => {
   const home = fakeHome();
   const dir = stateOf(home);
   const now = Date.parse('2026-11-27T12:00:00Z');
-  const check = () => byName(runDoctor({ home, env: {}, dir, run: realRun, config: {}, now }), '额度守护');
+  const check = () => byName(runDoctor({ home, env: {}, dir, run: realRun, config: {}, now }), '会话续跑巡检');
   assert.equal(check().status, 'info');
-  const q = path.join(dir, 'quota-guard');
+  const q = path.join(dir, 'session-sweep');
   fs.mkdirSync(q, { recursive: true });
   fs.writeFileSync(path.join(q, 'config.json'), JSON.stringify({ backupModel: 'claude-opus-5-5' }));
   assert.equal(check().status, 'warn', '还没跑过');
@@ -241,20 +241,15 @@ test('额度守护：没装给 ·；按时在跑给 ✓；超时或有失败给 
   const ok = check();
   assert.equal(ok.status, 'ok');
   assert.match(ok.detail[0], /claude-opus-5-5；上次检查：10 分钟前/);
-  fs.writeFileSync(path.join(q, 'log.jsonl'), [
-    { at: new Date(now - 3600e3).toISOString(), action: 'switched', sessionId: 'a', errorAt: 1 },
-    { at: new Date(now - 3600e3).toISOString(), action: 'failed', sessionId: 'b', errorAt: 1 },
-    { at: new Date(now - 3 * 864e5).toISOString(), action: 'failed' },
-  ].map(r => JSON.stringify(r)).join('\n') + '\n');
+  const row = (h, action, sessionId) => ({ at: new Date(now - h * 3600e3).toISOString(), action, sessionId, anchor: 1 });
+  const write = rows => fs.writeFileSync(path.join(q, 'log.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  write([row(1, 'continued', 'a'), row(1, 'failed', 'b'), row(72, 'failed', 'c')]);
   const bad = check();
   assert.equal(bad.status, 'warn');
-  assert.match(bad.detail[1], /换 1、失败 1、/);
-  fs.writeFileSync(path.join(q, 'log.jsonl'), [
-    { at: new Date(now - 3600e3).toISOString(), action: 'failed', sessionId: 's', errorAt: 1 },
-    { at: new Date(now - 1800e3).toISOString(), action: 'switched', sessionId: 's', errorAt: 1 },
-  ].map(r => JSON.stringify(r)).join('\n') + '\n');
+  assert.match(bad.detail[1], /续跑 1、.*失败 1、/);
+  write([row(1, 'failed', 's'), row(0.5, 'nudged', 's')]);
   assert.equal(check().status, 'ok', '失败后重试成功不算失败');
-  fs.writeFileSync(path.join(q, 'log.jsonl'), '');
+  write([]);
   fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 60 * 60e3).toISOString() }));
   assert.equal(check().status, 'warn', '超过 45 分钟');
 });

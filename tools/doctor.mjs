@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { inspect } from './global-instructions.mjs';
-import { paths as quotaPaths, selfUsage } from './quota-guard.mjs';
+import { paths as sweepPaths, selfUsage } from './session-sweep.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -333,18 +333,18 @@ function checkThinkingReview({ now, dir, home, env }) {
   };
 }
 
-// 额度守护（tools/quota-guard.mjs，桌面版定时任务每 15 分钟跑一次）：在不在跑、设了什么、最近 24 小时处理了什么。
+// 会话续跑巡检（tools/session-sweep.mjs，桌面版定时任务每 15 分钟跑一次）：在不在跑、设了什么、最近 24 小时处理了什么、自己花了多少。
 // 定时任务只在桌面版开着时跑，所以超时只给 ⚠。没装（没有设置文件）只给 ·。
-function checkQuotaGuard({ now, dir, env, home }) {
-  const name = '额度守护';
-  const qdir = path.join(dir, 'quota-guard');
-  const cfg = jsonOr(readText(path.join(qdir, 'config.json')), null);
-  if (!cfg) return { name, status: 'info', detail: ['没装（状态目录里没有 quota-guard/config.json）'] };
-  const state = jsonOr(readText(path.join(qdir, 'state.json')), null);
+function checkSessionSweep({ now, dir, env, home }) {
+  const name = '会话续跑巡检';
+  const sdir = path.join(dir, 'session-sweep');
+  const cfg = jsonOr(readText(path.join(sdir, 'config.json')), null);
+  if (!cfg) return { name, status: 'info', detail: ['没装（状态目录里没有 session-sweep/config.json）'] };
+  const state = jsonOr(readText(path.join(sdir, 'state.json')), null);
   const last = state?.lastScanAt ? Date.parse(state.lastScanAt) : NaN;
   const mins = Math.round((now - last) / 60e3);
-  const detail = [`备用模型：${cfg.backupModel || '不设（只提醒，不换）'}；上次检查：${state?.lastScanAt ? `${mins} 分钟前` : '还没跑过'}`];
-  const rows = (readText(path.join(qdir, 'log.jsonl')) || '').split('\n').flatMap(l => {
+  const detail = [`备用模型：${cfg.backupModel || '不设'}；上次检查：${state?.lastScanAt ? `${mins} 分钟前` : '还没跑过'}`];
+  const rows = (readText(path.join(sdir, 'log.jsonl')) || '').split('\n').flatMap(l => {
     try {
       return l ? [JSON.parse(l)] : [];
     } catch {
@@ -353,17 +353,17 @@ function checkQuotaGuard({ now, dir, env, home }) {
   });
   const recent = rows.filter(r => now - Date.parse(r.at) <= 864e5);
   // 失败后下一轮重试成功的，不再算失败
-  const ok = new Set(rows.filter(r => r.action === 'switched').map(r => `${r.sessionId}@${r.errorAt}`));
-  const count = a => recent.filter(r => r.action === a && !(a === 'failed' && ok.has(`${r.sessionId}@${r.errorAt}`))).length;
-  if (recent.length) detail.push(`最近 24 小时：换 ${count('switched')}、失败 ${count('failed')}、只提醒 ${count('reminded')}、停下 ${count('alerted')}、排除 ${count('excluded')}（node tools/quota-guard.mjs status 看明细）`);
-  const u = selfUsage({ p: { ...quotaPaths(env, home), dir: qdir }, now });
-  if (u.runs) detail.push(`最近 24 小时守护自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
+  const done = new Set(rows.filter(r => ['switched', 'continued', 'nudged'].includes(r.action)).map(r => `${r.sessionId}@${r.anchor}`));
+  const count = a => recent.filter(r => r.action === a && !(a === 'failed' && done.has(`${r.sessionId}@${r.anchor}`))).length;
+  if (recent.length) detail.push(`最近 24 小时：换模型续跑 ${count('switched')}、续跑 ${count('continued')}、催核对 ${count('nudged')}、只通知 ${count('notified')}、失败 ${count('failed')}、排除 ${count('excluded')}（node tools/session-sweep.mjs status 看明细）`);
+  const u = selfUsage({ p: { ...sweepPaths(env, home), dir: sdir }, now, taskId: cfg.taskId || 'quota-guard' });
+  if (u.runs) detail.push(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
   let status = 'ok';
   if (!(mins <= 45)) {
     status = 'warn';
-    detail.push('超过 45 分钟没检查：看桌面版是不是没开，或定时任务「quota-guard」是否被停用、运行是否报错');
+    detail.push('超过 45 分钟没检查：看桌面版是不是没开，或巡检的定时任务是否被停用、运行是否报错');
   }
-  if (count('failed') || count('alerted')) status = 'warn';
+  if (count('failed')) status = 'warn';
   return { name, status, detail };
 }
 
@@ -432,7 +432,7 @@ export function runDoctor(deps = {}) {
     checkAutoMemory(ctx),
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
-    checkQuotaGuard(ctx),
+    checkSessionSweep(ctx),
     ...checkRepos(ctx),
     checkRepoHooks(ctx),
   ];
