@@ -167,7 +167,7 @@ export function scan({ p, now = Date.now() }) {
       continue;
     }
     // 报错里的模型和会话现在的模型不是一家：常浩已经手动换过了
-    if (family(s.model) !== c.name.toLowerCase()) {
+    if (family(s.model) !== c.name.split(/\s+/)[0].toLowerCase()) {
       skipped.modelChanged++;
       continue;
     }
@@ -214,8 +214,8 @@ export function scan({ p, now = Date.now() }) {
 const ACTIONS = new Set(['switched', 'failed', 'reminded', 'alerted', 'excluded']);
 
 export function record({ p, now = Date.now(), args }) {
-  if (!args.session || !args['error-at'] || !ACTIONS.has(args.action)) {
-    throw new Error(`record 要 --session、--error-at，--action 取 ${[...ACTIONS].join(' / ')}`);
+  if (!args.session || !(Number(args['error-at']) > 0) || !ACTIONS.has(args.action)) {
+    throw new Error(`record 要 --session、--error-at（毫秒数），--action 取 ${[...ACTIONS].join(' / ')}`);
   }
   const row = {
     at: new Date(now).toISOString(),

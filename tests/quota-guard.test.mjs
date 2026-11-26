@@ -97,6 +97,7 @@ test('处理过的同一次报错不再处理；失败的再试一次，两次�
 test('留痕和设置：record 校验动作，status 读得回来，backup none 清掉', () => {
   const { p } = fake();
   assert.throws(() => record({ p, args: { session: 'x', 'error-at': '1', action: 'whatever' } }));
+  assert.throws(() => record({ p, args: { session: 'x', 'error-at': '2026-11-27T00:00:00Z', action: 'switched' } }), /毫秒/);
   record({ p, now: NOW, args: { session: 'local_d', 'error-at': '1', action: 'switched', from: 'claude-fable-5-2', to: 'claude-opus-5-5', note: 'Fable 额度用完' } });
   const s = status({ p });
   assert.equal(s.configured, false);
@@ -128,4 +129,11 @@ test('守护自己的花费：只算 24 小时内 quota-guard 的运行，同一
   run('old', NOW - 25 * 3600e3, [['m3', { input_tokens: 9, output_tokens: 9 }]]);
   addSession(p, { id: 'other' });
   assert.deepEqual(status({ p, now: NOW }).usage24h, { runs: 1, calls: 2, input: 3, cacheWrite: 100, cacheRead: 1500, output: 15 });
+});
+
+test('报错里的模型名带版本号也认得', () => {
+  const { p } = fake();
+  setConfig({ p, args: { backup: 'claude-opus-5-5' } });
+  addSession(p, { id: 'ver', model: 'claude-fable-5-2', error: "You've hit your Fable 5.2 limit · resets 2am" });
+  assert.equal(scan({ p, now: NOW }).actions[0]?.action, 'switch');
 });

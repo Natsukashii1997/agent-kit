@@ -242,13 +242,18 @@ test('额度守护：没装给 ·；按时在跑给 ✓；超时或有失败给 
   assert.equal(ok.status, 'ok');
   assert.match(ok.detail[0], /claude-opus-5-5；上次检查：10 分钟前/);
   fs.writeFileSync(path.join(q, 'log.jsonl'), [
-    { at: new Date(now - 3600e3).toISOString(), action: 'switched' },
-    { at: new Date(now - 3600e3).toISOString(), action: 'failed' },
+    { at: new Date(now - 3600e3).toISOString(), action: 'switched', sessionId: 'a', errorAt: 1 },
+    { at: new Date(now - 3600e3).toISOString(), action: 'failed', sessionId: 'b', errorAt: 1 },
     { at: new Date(now - 3 * 864e5).toISOString(), action: 'failed' },
   ].map(r => JSON.stringify(r)).join('\n') + '\n');
   const bad = check();
   assert.equal(bad.status, 'warn');
   assert.match(bad.detail[1], /换 1、失败 1、/);
+  fs.writeFileSync(path.join(q, 'log.jsonl'), [
+    { at: new Date(now - 3600e3).toISOString(), action: 'failed', sessionId: 's', errorAt: 1 },
+    { at: new Date(now - 1800e3).toISOString(), action: 'switched', sessionId: 's', errorAt: 1 },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n');
+  assert.equal(check().status, 'ok', '失败后重试成功不算失败');
   fs.writeFileSync(path.join(q, 'log.jsonl'), '');
   fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 60 * 60e3).toISOString() }));
   assert.equal(check().status, 'warn', '超过 45 分钟');

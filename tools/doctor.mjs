@@ -352,7 +352,9 @@ function checkQuotaGuard({ now, dir, env, home }) {
     }
   });
   const recent = rows.filter(r => now - Date.parse(r.at) <= 864e5);
-  const count = a => recent.filter(r => r.action === a).length;
+  // 失败后下一轮重试成功的，不再算失败
+  const ok = new Set(rows.filter(r => r.action === 'switched').map(r => `${r.sessionId}@${r.errorAt}`));
+  const count = a => recent.filter(r => r.action === a && !(a === 'failed' && ok.has(`${r.sessionId}@${r.errorAt}`))).length;
   if (recent.length) detail.push(`最近 24 小时：换 ${count('switched')}、失败 ${count('failed')}、只提醒 ${count('reminded')}、停下 ${count('alerted')}、排除 ${count('excluded')}（node tools/quota-guard.mjs status 看明细）`);
   const u = selfUsage({ p: { ...quotaPaths(env, home), dir: qdir }, now });
   if (u.runs) detail.push(`最近 24 小时守护自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
