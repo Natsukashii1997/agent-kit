@@ -590,8 +590,8 @@
 - 和 G-29 的关系：G-29 讲「故意改坏」碰到了正式环境；本条讲临时改动没还原回来，不重复。
 - 来源：postpane L-32（2026-11-09，#257，`ee7c73b`；证据 `~/Library/Application Support/postpane/evidence/2026-11-09-257-relay-receipts/red-host.log`；补充 #251）。
 - 出现过的项目：postpane（2 次）。
-- 升级：〔提醒〕未升级（2026-11-19，积压清单组 14，常浩批）：只有关键词提醒。「一条命令里改了又还原」的写法太多（`sed -i`、`perl -pi`、`python`、`cp`），预检认不全、误拦面大，没做〔机检〕。postpane 一轮流程采纳「先写测试跑出红」（积压清单组 17 的 E-14）是项目内的〔文字〕。2026-11-27 批阅单第 7 项（常浩批，#135）收窄触发：只在同一条命令里先 `sed -i` 改、再跑测试、之后又有还原动作（`git checkout --`、`git restore`、第二个 `sed -i`、`cp` 回副本）时提醒；单独的 `git checkout -- <文件>` 不再提醒。依据：装后 6 天旧正则命中 58 次，逐条看只有 10 次是改、测、还原写在一条命令里（其中 6 次用 `cp` 回副本还原，所以把 `cp` 也算还原），其余 48 次是正常的「改完就测」；回放后这条从 31 次降到 11 次。
-- 触发：`验红`、`/\bsed -i\b[^\n]*(&&|;)[^\n]*(--test\b|\btest\.sh\b|\b(npm|pnpm|yarn|bun|cargo|swift|go) (run )?test\b)[^\n]*(;|&&|\|\|)[^\n]*(\bgit (checkout --|restore\b)|\bsed -i\b|\bcp\b)/`
+- 升级：〔提醒〕未升级（2026-11-19，积压清单组 14，常浩批）：只有关键词提醒。「一条命令里改了又还原」的写法太多（`sed -i`、`perl -pi`、`python`、`cp`），预检认不全、误拦面大，没做〔机检〕。postpane 一轮流程采纳「先写测试跑出红」（积压清单组 17 的 E-14）是项目内的〔文字〕。2026-11-27 批阅单第 7 项（常浩批，#135）收窄触发：只在同一条命令里先 `sed -i` 改、再跑测试、之后又有还原动作（`git checkout --`、`git restore`、第二个 `sed -i`，或「先 `cp` 备份、`sed -i` 改、测、再 `cp` 回来」）时提醒；单独的 `git checkout -- <文件>`、测试后复制普通产物（如 `cp dist/app.js …`）、`--test-mode` 这类参数都不提醒。依据：装后 6 天旧正则命中 58 次，逐条看只有 10 次是改、测、还原写在一条命令里，其中 6 次用 `cp` 回副本还原。副本名不统一（`.bak`、`.orig`，也有 `bg-keep.js`、`adapter.fixed.ts`），只认后缀会漏掉 2 个会话，所以按「改之前先 `cp` 过」来认。其余 48 次是正常的「改完就测」。回放后这条从 31 次降到 11 次。只认这几种高频写法：`perl -pi`、python 改文件、`mv` 还原、改测还原分在多行、`make test`、`pytest` 都认不出（旧规则也不认），只靠 `验红` 一词和条目本身。
+- 触发：`验红`、`/\bsed -i\b[^\n]*(&&|;)[^\n]*(--test(?=[\s=;&|)]|$)|\btest\.sh\b|\b(npm|pnpm|yarn|bun|cargo|swift|go) (run )?test\b)[^\n]*(;|&&|\|\|)[^\n]*(\bgit (checkout --|restore\b)|\bsed -i\b)/`、`/\bcp\b[^\n]*\bsed -i\b[^\n]*(&&|;)[^\n]*(--test(?=[\s=;&|)]|$)|\btest\.sh\b|\b(npm|pnpm|yarn|bun|cargo|swift|go) (run )?test\b)[^\n]*(;|&&|\|\|)[^\n]*\bcp\b/`
 
 ## G-41 会删东西的工具，新加的删除目录没过同一道安全检查（2026-11-19 提升）
 

@@ -34,13 +34,20 @@ test('交来方案、普通请求、长文都不提醒（#135 去掉了「交来
 });
 
 test('说「不用送 / 直接开工」不提醒，即使提到思维评审', () => {
-  for (const p of ['这个不用送，直接做', '直接开工', '不用思维评审了', '先不评审']) assert.equal(sig(p), null, p);
+  for (const p of ['这个不用送，直接做', '直接开工', '不用思维评审了', '先不评审', '按推荐直接开工']) assert.equal(sig(p), null, p);
+});
+
+test('消息里带「直接开工」但同时点名或质疑方向，照样提醒（#135 审查 P1-01）', () => {
+  assert.equal(sig('不要直接开工，先思维评审一下'), 'asked');
+  assert.equal(sig('你上次让我直接开工，但这个方向对吗？'), 'doubt');
 });
 
 test('别的会话派来的任务（委派）不提醒：里面提到思维评审也不算常浩点名', () => {
   assert.equal(sig(`Background (from the session that started this one):\n${plan()}\n去掉思维评审钩子的泛化提醒`), null);
   assert.equal(sig('Task (from the session that started this one): 这个方向对吗'), null);
-  assert.equal(sig(`Please carry out this task for me.\n思维评审`), null);
+  assert.equal(sig('Please carry out this task from my Orca coordinator by following the brief I pasted below.\n思维评审'), null, 'Orca 协调器派单');
+  // 用户自己用这句英文开头，不是派单（#135 审查 P2-03）
+  assert.equal(sig('Please carry out this task: 思维评审一下这个方案'), 'asked');
 });
 
 test('后台事件、会话间通知、斜杠命令不提醒', () => {

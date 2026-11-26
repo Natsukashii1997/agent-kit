@@ -239,6 +239,9 @@ test('2026-11-27 批阅单第 7 项（#135）：五条只查、G-40 和 G-43 收
     "sed -i '' '11s/x/y/' CURRENT.md && node --test tests/*.test.mjs && node scripts/check-rules.mjs",
     "sed -i '' 's/a/b/' x.js && sed -i '' 's/c/d/' y.test.mjs",
     'git checkout -- src/crates/host/src/relay.rs',
+    // #135 审查 P2-01：测试后复制普通产物、不是测试命令的 --test-mode，都不算
+    "sed -i '' 's/a/b/' x.js && npm test && cp dist/app.js out/app.js",
+    "sed -i '' 's/a/b/' x.js && node app.js --test-mode; sed -i '' 's/b/a/' x.js",
   ])
     assert.ok(!real(bash(c)).includes('G-40'), c);
   assert.ok(real(bash("echo '验红：去掉 persist()'")).includes('G-40'), '验红一词照旧');

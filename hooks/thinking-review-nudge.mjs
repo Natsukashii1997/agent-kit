@@ -18,9 +18,12 @@ export const OFF_FILE = 'thinking-review-nudge.off';
 // 不是常浩在说话：后台事件、会话间通知、定时任务、CI 回报、斜杠命令展开；
 // 上下文压缩后的续接摘要、驿窗转回来的 GPT 回信（由 skill 第 6 节处理）
 const AUTOMATED = /^\s*(?:<(?:side-sessions-event|task-notification|ci-monitor-event|scheduled-task|system-reminder|local-command|command-name|command-message)\b|\[SYSTEM NOTIFICATION|This session is being continued from a previous conversation|The agent-hud plugin sent)/i;
-// 别的会话派来的任务说明：不是常浩点名，里面提到思维评审也不提醒
-const DELEGATED = /^\s*(?:(?:Background|Task) \(from the session|Please carry out this task)/i;
-const OPT_OUT = /(?:不用|不必|别|不要|无需|先不)(?:再)?(?:送审?|送\s*GPT|思维评审|评审)|直接开工/i;
+// 别的会话派来的任务说明：不是常浩点名，里面提到思维评审也不提醒。
+// 只认应用和 Orca 协调器派单的固定开头；用户自己打的「Please carry out this task: …」不算（#135 审查 P2-03）
+const DELEGATED = /^\s*(?:(?:Background|Task) \(from the session|Please carry out this task from my \w+ coordinator)/i;
+// 常浩说「不用送 / 不用思维评审」：只认否定评审的说法。「直接开工」不放这里：
+// 它本来就不带点名或质疑信号，放进来反而会吞掉「不要直接开工，先思维评审」（#135 审查 P1-01）
+const OPT_OUT = /(?:不用|不必|别|不要|无需|先不)(?:再)?(?:送审?|送\s*GPT|思维评审|评审)/i;
 const ASKED = /思维评审|送\s*GPT\s*想/i;
 const DOUBT = /方向(?:不对|错了|有问题|是不是错|对吗|对不对|是不是对)|是不是(?:想|搞|做)错了|(?:前提|思路)(?:不对|错了|对吗|对不对)|推翻(?:重来|方案)|重新(?:想|考虑)(?:一下)?(?:方案|方向|思路)|(?:要不要|需不需要)再论证/;
 const SHORT_MAX_CHARS = 400;
@@ -30,7 +33,7 @@ export function promptSignal(prompt) {
   const text = String(prompt || '');
   if (!text.trim() || AUTOMATED.test(text) || DELEGATED.test(text) || /^\s*\/[\w:-]+/.test(text)) return null;
   const short = text.length <= SHORT_MAX_CHARS;
-  // 「不用送 / 直接开工」是常浩的指令，只认短消息
+  // 「不用送」是常浩的指令，只认短消息
   if (short && OPT_OUT.test(text)) return null;
   if (ASKED.test(text)) return 'asked';
   if (short && DOUBT.test(text)) return 'doubt';
