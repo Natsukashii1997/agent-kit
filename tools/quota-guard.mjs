@@ -231,9 +231,38 @@ export function record({ p, now = Date.now(), args }) {
   return row;
 }
 
-export function status({ p }) {
+// 守护自己花了多少：定时任务 quota-guard 在 since 之后的每次运行，按消息去重累加 token
+export function selfUsage({ p, now = Date.now(), hours = 24, taskId = 'quota-guard' }) {
+  const since = now - hours * 3600e3;
+  const total = { runs: 0, calls: 0, input: 0, cacheWrite: 0, cacheRead: 0, output: 0 };
+  for (const file of listSessionFiles(p.sessions)) {
+    const s = readJson(file, null);
+    if (s?.scheduledTaskId !== taskId || !(s.createdAt >= since)) continue;
+    const tr = findTranscript(p.projects, s.cliSessionId);
+    if (!tr) continue;
+    total.runs++;
+    const seen = new Map();
+    for (const line of fs.readFileSync(tr, 'utf8').split('\n')) {
+      if (!line.includes('"usage"')) continue;
+      try {
+        const d = JSON.parse(line);
+        if (d.type === 'assistant' && d.message?.usage) seen.set(d.message.id, d.message.usage);
+      } catch {}
+    }
+    for (const u of seen.values()) {
+      total.calls++;
+      total.input += u.input_tokens || 0;
+      total.cacheWrite += u.cache_creation_input_tokens || 0;
+      total.cacheRead += u.cache_read_input_tokens || 0;
+      total.output += u.output_tokens || 0;
+    }
+  }
+  return total;
+}
+
+export function status({ p, now = Date.now() }) {
   const exists = fs.existsSync(p.config);
-  return { configured: exists, config: loadConfig(p), state: readJson(p.state, null), recent: readLog(p).slice(-20) };
+  return { configured: exists, config: loadConfig(p), state: readJson(p.state, null), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
 }
 
 export function setConfig({ p, args }) {
@@ -289,6 +318,9 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     else {
       console.log(`备用模型：${s.config.backupModel || '不设（只提醒，不换）'}　不换分区：${s.config.excludeGroupName}　只管 ${s.config.maxAgeHours} 小时内的报错`);
       console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}`);
+      const u = s.usage24h;
+      const w = n => `${(n / 1e4).toFixed(1)} 万`;
+      console.log(`最近 24 小时守护自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}、写缓存 ${w(u.cacheWrite)}），输出 ${w(u.output)}`);
       for (const r of s.recent) console.log(`${r.at}  ${SHOW[r.action] || r.action}  ${r.sessionId}  ${r.from || ''}${r.to ? ` → ${r.to}` : ''}  ${r.note}`);
     }
     return 0;

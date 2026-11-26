@@ -116,3 +116,16 @@ test('命令行：scan 输出 JSON，未知命令退出码 2', () => {
   assert.deepEqual(JSON.parse(ok.stdout).actions, []);
   assert.equal(spawnSync(process.execPath, [bin, 'nope'], { env: e, encoding: 'utf8' }).status, 2);
 });
+
+test('守护自己的花费：只算 24 小时内 quota-guard 的运行，同一条消息只算一次', () => {
+  const { p } = fake();
+  const run = (id, createdAt, usages) => {
+    fs.writeFileSync(path.join(p.sessions, 'acct', 'org', `local_${id}.json`), JSON.stringify({ sessionId: `local_${id}`, cliSessionId: `cli-${id}`, scheduledTaskId: 'quota-guard', createdAt }));
+    const rows = usages.flatMap(([mid, u]) => [{ type: 'assistant', message: { id: mid, usage: u } }, { type: 'assistant', message: { id: mid, usage: u } }]);
+    fs.writeFileSync(path.join(p.projects, '-Users-x-proj', `cli-${id}.jsonl`), rows.map(r => JSON.stringify(r)).join('\n'));
+  };
+  run('r1', NOW - 3600e3, [['m1', { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 10 }], ['m2', { input_tokens: 1, cache_read_input_tokens: 500, output_tokens: 5 }]]);
+  run('old', NOW - 25 * 3600e3, [['m3', { input_tokens: 9, output_tokens: 9 }]]);
+  addSession(p, { id: 'other' });
+  assert.deepEqual(status({ p, now: NOW }).usage24h, { runs: 1, calls: 2, input: 3, cacheWrite: 100, cacheRead: 1500, output: 15 });
+});
