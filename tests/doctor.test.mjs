@@ -226,3 +226,30 @@ test('近 7 天坑提醒：分开数真正提醒和关键词匹配，按提醒�
   assert.equal(r.detail[0], '一共提醒 3 次，3 个会话，平均每会话 1.0 条');
   assert.equal(r.detail[1], 'G-04 提醒 2 次（2 个会话）/ 匹配 2 次、G-03 提醒 1 次（1 个会话）/ 匹配 4 次');
 });
+
+test('额度守护：没装给 ·；按时在跑给 ✓；超时或有失败给 ⚠', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const now = Date.parse('2026-11-27T12:00:00Z');
+  const check = () => byName(runDoctor({ home, env: {}, dir, run: realRun, config: {}, now }), '额度守护');
+  assert.equal(check().status, 'info');
+  const q = path.join(dir, 'quota-guard');
+  fs.mkdirSync(q, { recursive: true });
+  fs.writeFileSync(path.join(q, 'config.json'), JSON.stringify({ backupModel: 'claude-opus-5-5' }));
+  assert.equal(check().status, 'warn', '还没跑过');
+  fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 10 * 60e3).toISOString() }));
+  const ok = check();
+  assert.equal(ok.status, 'ok');
+  assert.match(ok.detail[0], /claude-opus-5-5；上次检查：10 分钟前/);
+  fs.writeFileSync(path.join(q, 'log.jsonl'), [
+    { at: new Date(now - 3600e3).toISOString(), action: 'switched' },
+    { at: new Date(now - 3600e3).toISOString(), action: 'failed' },
+    { at: new Date(now - 3 * 864e5).toISOString(), action: 'failed' },
+  ].map(r => JSON.stringify(r)).join('\n') + '\n');
+  const bad = check();
+  assert.equal(bad.status, 'warn');
+  assert.match(bad.detail[1], /换 1、失败 1、/);
+  fs.writeFileSync(path.join(q, 'log.jsonl'), '');
+  fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 60 * 60e3).toISOString() }));
+  assert.equal(check().status, 'warn', '超过 45 分钟');
+});

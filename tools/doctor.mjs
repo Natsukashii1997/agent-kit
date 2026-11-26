@@ -332,6 +332,36 @@ function checkThinkingReview({ now, dir, home, env }) {
   };
 }
 
+// 额度守护（tools/quota-guard.mjs，桌面版定时任务每 15 分钟跑一次）：在不在跑、设了什么、最近 24 小时处理了什么。
+// 定时任务只在桌面版开着时跑，所以超时只给 ⚠。没装（没有设置文件）只给 ·。
+function checkQuotaGuard({ now, dir }) {
+  const name = '额度守护';
+  const qdir = path.join(dir, 'quota-guard');
+  const cfg = jsonOr(readText(path.join(qdir, 'config.json')), null);
+  if (!cfg) return { name, status: 'info', detail: ['没装（状态目录里没有 quota-guard/config.json）'] };
+  const state = jsonOr(readText(path.join(qdir, 'state.json')), null);
+  const last = state?.lastScanAt ? Date.parse(state.lastScanAt) : NaN;
+  const mins = Math.round((now - last) / 60e3);
+  const detail = [`备用模型：${cfg.backupModel || '不设（只提醒，不换）'}；上次检查：${state?.lastScanAt ? `${mins} 分钟前` : '还没跑过'}`];
+  const rows = (readText(path.join(qdir, 'log.jsonl')) || '').split('\n').flatMap(l => {
+    try {
+      return l ? [JSON.parse(l)] : [];
+    } catch {
+      return [];
+    }
+  });
+  const recent = rows.filter(r => now - Date.parse(r.at) <= 864e5);
+  const count = a => recent.filter(r => r.action === a).length;
+  if (recent.length) detail.push(`最近 24 小时：换 ${count('switched')}、失败 ${count('failed')}、只提醒 ${count('reminded')}、停下 ${count('alerted')}、排除 ${count('excluded')}（node tools/quota-guard.mjs status 看明细）`);
+  let status = 'ok';
+  if (!(mins <= 45)) {
+    status = 'warn';
+    detail.push('超过 45 分钟没检查：看桌面版是不是没开，或定时任务「quota-guard」是否被停用、运行是否报错');
+  }
+  if (count('failed') || count('alerted')) status = 'warn';
+  return { name, status, detail };
+}
+
 function checkRepos({ config, run }) {
   return (config.repos || []).map(repo => {
     const name = `仓库 ${path.basename(repo)}`;
@@ -397,6 +427,7 @@ export function runDoctor(deps = {}) {
     checkAutoMemory(ctx),
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
+    checkQuotaGuard(ctx),
     ...checkRepos(ctx),
     checkRepoHooks(ctx),
   ];
