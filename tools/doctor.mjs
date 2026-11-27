@@ -360,7 +360,7 @@ function checkSessionSweep({ now, dir, env, home }) {
   // 失败后下一轮重试成功的，不再算失败
   const done = new Set(rows.filter(r => ['switched', 'continued', 'nudged'].includes(r.action)).map(r => `${r.sessionId}@${r.anchor}`));
   const count = a => recent.filter(r => r.action === a && !(a === 'failed' && done.has(`${r.sessionId}@${r.anchor}`))).length;
-  if (recent.length) detail.push(`最近 24 小时：换模型续跑 ${count('switched')}、续跑 ${count('continued')}、催核对 ${count('nudged')}、只通知 ${count('notified')}、失败 ${count('failed')}、排除 ${count('excluded')}（node tools/session-sweep.mjs status 看明细）`);
+  if (recent.length) detail.push(`最近 24 小时：换模型续跑 ${count('switched')}、续跑 ${count('continued')}、催核对 ${count('nudged')}、只通知 ${count('notified')}、失败 ${count('failed')}、不确定 ${count('unsure')}、排除 ${count('excluded')}（node tools/session-sweep.mjs status 看明细）`);
   const u = selfUsage({ p: { ...sweepPaths(env, home), dir: sdir }, now, taskId: cfg.taskId || 'quota-guard' });
   if (u.runs) detail.push(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
   let status = 'ok';
@@ -368,9 +368,16 @@ function checkSessionSweep({ now, dir, env, home }) {
     status = 'warn';
     detail.push('超过 45 分钟没检查：看桌面版是不是没开，或巡检的定时任务是否被停用、运行是否报错');
   }
-  if (!Number.isNaN(doneAt) && scanAt - doneAt > 30 * 60e3) {
+  // 扫描已经过去 30 分钟，这一轮还没有完成记录：中途崩了或卡住了
+  if (!Number.isNaN(scanAt) && now - scanAt > 30 * 60e3 && (Number.isNaN(doneAt) || doneAt < scanAt)) {
     status = 'warn';
-    detail.push('最近一轮扫描后没跑完（没有完成记录）：看巡检定时任务最近一次运行的报错');
+    detail.push('最近一轮扫描后 30 分钟还没跑完（没有完成记录）：看巡检定时任务最近一次运行的报错');
+  }
+  const lock = jsonOr(readText(path.join(sdir, 'run.lock')), null);
+  if (lock?.at) detail.push(`正在跑：自 ${Math.round((now - Date.parse(lock.at)) / 60e3)} 分钟前起`);
+  if (count('unsure')) {
+    status = 'warn';
+    detail.push(`最近 24 小时有 ${count('unsure')} 次发消息结果不确定（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼`);
   }
   if (count('failed')) status = 'warn';
   return { name, status, detail };

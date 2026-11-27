@@ -2,9 +2,9 @@
 // 会话续跑巡检：找出「停下了、没人接」的 Claude 桌面会话，交给桌面版定时任务按原因接上。
 // 本脚本只读桌面版的会话索引和会话记录、只写自己状态目录里的文件，不改任何会话；
 // 换模型、发消息由定时任务用桌面版的会话管理工具做（launchd 调不到那些工具）。
-//   node tools/session-sweep.mjs scan [--lease]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--lease 占住本轮（上一轮没跑完就不重复处理）
-//   node tools/session-sweep.mjs check --session <id> --anchor <毫秒> [--model <模型>]   动手前复核：这个会话是否仍停在同一处、没人接
-//   node tools/session-sweep.mjs done               本轮处理完，记下完成时间、放开占用
+//   node tools/session-sweep.mjs scan [--lease]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--lease 先原子地占住本轮（输出 runId；别人占着就不处理）
+//   node tools/session-sweep.mjs check --session <id> --anchor <毫秒> [--model <模型>]   动手前复核：still（仍停在原处）/ taken（有人接手）/ moved（停在了别处）/ unknown（拿不准）
+//   node tools/session-sweep.mjs done [--run <runId>]  本轮处理完，记下完成时间；带 --run 时放开自己持有的占用
 //   node tools/session-sweep.mjs record --session <id> --anchor <毫秒> --kind <类别> --action <动作> [--from <模型>] [--to <模型>] [--note <说明>]
 //   node tools/session-sweep.mjs backlog [--json]   巡检启用前就停着的、或超出时间窗的会话清单（只列不动，给常浩过目）
 //   node tools/session-sweep.mjs status [--json]    设置、上次检查、自身花费、最近留痕
@@ -36,6 +36,7 @@ export function paths(env = process.env, home = os.homedir()) {
     config: path.join(dir, 'config.json'),
     log: path.join(dir, 'log.jsonl'),
     state: path.join(dir, 'state.json'),
+    lock: path.join(dir, 'run.lock'),
     sessions: env.SESSION_SWEEP_SESSIONS_DIR || path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     projects: env.SESSION_SWEEP_PROJECTS_DIR || path.join(home, '.claude', 'projects'),
   };
@@ -76,22 +77,57 @@ export function readLog(p) {
 export const family = model => (String(model || '').match(/^claude-([a-z]+)/i)?.[1] || String(model || '')).toLowerCase();
 
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
-// 「resets 4:10am (…)」「resets Nov 28 at 2am (…)」→ 报错之后的那个重置时刻（按本机时区）；认不出返回 null
+
+// 某个时区里的「墙上时间」各部分；tz 为空用本机时区
+function wallParts(t, tz) {
+  if (!tz) {
+    const d = new Date(t);
+    return { y: d.getFullYear(), mo: d.getMonth(), d: d.getDate() };
+  }
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23' }).formatToParts(new Date(t)).map(x => [x.type, Number(x.value)]));
+  return { y: parts.year, mo: parts.month - 1, d: parts.day, h: parts.hour, mi: parts.minute, s: parts.second };
+}
+// 时区 tz 里的 y-mo-d h:mi → 时间戳；tz 为空用本机时区
+function fromWall(y, mo, d, h, mi, tz) {
+  if (!tz) return new Date(y, mo, d, h, mi, 0, 0).getTime();
+  const guess = Date.UTC(y, mo, d, h, mi);
+  const off = t => {
+    const p = wallParts(t, tz);
+    return Date.UTC(p.y, p.mo, p.d, p.h, p.mi, p.s) - Math.floor(t / 1000) * 1000;
+  };
+  let t = guess - off(guess);
+  t = guess - off(t);
+  return t;
+}
+const validTz = tz => {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// 「resets 4:10am (Asia/Shanghai)」「resets Nov 28 at 2am (…)」→ 报错之后的那个重置时刻。
+// 按报错括号里的时区算；没写或认不出时区，按本机时区。认不出时间返回 null
 export function parseReset(text, errorAt) {
-  const m = String(text || '').match(/resets (?:([A-Z][a-z]{2}) (\d{1,2}) at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
+  const m = String(text || '').match(/resets (?:([A-Z][a-z]{2}) (\d{1,2}) at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z_]+\/[A-Za-z_\/+-]+)\))?/i);
   if (!m) return null;
+  const tz = m[6] && validTz(m[6]) ? m[6] : null;
   let h = Number(m[3]) % 12;
   if (m[5].toLowerCase() === 'pm') h += 12;
-  const base = new Date(errorAt);
-  const d = new Date(base);
-  d.setHours(h, Number(m[4] || 0), 0, 0);
+  const mi = Number(m[4] || 0);
+  const base = wallParts(errorAt, tz);
   if (m[1]) {
     const mon = MONTHS[m[1].toLowerCase()];
     if (mon === undefined) return null;
-    d.setMonth(mon, Number(m[2]));
-    if (d.getTime() < errorAt - 864e5) d.setFullYear(d.getFullYear() + 1);
-  } else if (d.getTime() <= errorAt) d.setDate(d.getDate() + 1);
-  return d.getTime();
+    let t = fromWall(base.y, mon, Number(m[2]), h, mi, tz);
+    if (t < errorAt - 864e5) t = fromWall(base.y + 1, mon, Number(m[2]), h, mi, tz);
+    return t;
+  }
+  let t = fromWall(base.y, base.mo, base.d, h, mi, tz);
+  if (t <= errorAt) t = fromWall(base.y, base.mo, base.d + 1, h, mi, tz);
+  return t;
 }
 
 // 按桌面版记下的报错，分出停下的原因
@@ -195,14 +231,53 @@ export function stoppedState(s, last) {
 
 const keyOf = (sessionId, anchor) => `${sessionId}@${anchor}`;
 
-export function scan({ p, now = Date.now(), lease = false }) {
-  const config = loadConfig(p);
-  const prev = readJson(p.state, {}) || {};
-  if (lease && prev.leaseUntil > now) {
-    // 上一轮还没跑完（没调 done）：这一轮不处理，免得同一个会话被叫醒两次
-    const result = { scannedAt: new Date(now).toISOString(), config, actions: [], skipped: { leased: 1 } };
-    return { ...result, backlog: [] };
+// 原子占用：独占创建 run.lock。别人占着且没过期就返回 null；过期的（上一轮死掉）清掉再占
+export function acquireLock(p, now = Date.now()) {
+  fs.mkdirSync(p.dir, { recursive: true });
+  const runId = `${now.toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(p.lock, 'wx');
+      fs.writeSync(fd, JSON.stringify({ runId, at: new Date(now).toISOString() }));
+      fs.closeSync(fd);
+      return runId;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const held = readJson(p.lock, null);
+      const at = Date.parse(held?.at);
+      // 读不出或没过期：当作别人占着（读不出可能是对方刚创建、还没写完）
+      if (!(now - at > LEASE_MS)) return null;
+      try {
+        // 只删自己看到的那把过期锁：换名后核对内容，不是它就放回
+        const tmp = `${p.lock}.stale-${runId}`;
+        fs.renameSync(p.lock, tmp);
+        if (readJson(tmp, null)?.runId !== held.runId) fs.renameSync(tmp, p.lock);
+        else fs.unlinkSync(tmp);
+      } catch {}
+    }
   }
+  return null;
+}
+
+export function lockInfo(p) {
+  return readJson(p.lock, null);
+}
+
+// 只放开自己持有的占用
+export function releaseLock(p, runId) {
+  const held = readJson(p.lock, null);
+  if (!runId || held?.runId !== runId) return false;
+  try {
+    fs.unlinkSync(p.lock);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 纯读：找出这一轮要处理的会话和存量，不写任何文件
+export function collect({ p, now = Date.now() }) {
+  const config = loadConfig(p);
   const log = readLog(p);
   const fails = {};
   const handled = new Set();
@@ -299,50 +374,76 @@ export function scan({ p, now = Date.now(), lease = false }) {
     wakes++;
     return true;
   });
-  const result = { scannedAt: new Date(now).toISOString(), config, actions, skipped };
-  const state = { ...prev, lastScanAt: result.scannedAt, actions: actions.length, skipped };
-  if (!actions.length) {
-    // 没事可做，这一轮到此就算跑完
-    state.lastRunCompletedAt = result.scannedAt;
-    delete state.leaseUntil;
-  } else if (lease) state.leaseUntil = now + LEASE_MS;
-  writeState(p, state);
-  return { ...result, backlog };
+  return { scannedAt: new Date(now).toISOString(), config, actions, skipped, backlog };
 }
 
+// 巡检的一轮：lease 时先原子占用（占不到就不处理），再 collect，记下检查时间。
+// 没事可做的一轮当场算跑完、放开占用；有事的由任务处理完后调 done。
+export function scan({ p, now = Date.now(), lease = false }) {
+  let runId = null;
+  if (lease) {
+    runId = acquireLock(p, now);
+    if (!runId) {
+      const held = lockInfo(p);
+      return { scannedAt: new Date(now).toISOString(), config: loadConfig(p), actions: [], skipped: { leased: 1 }, busySince: held?.at || null, backlog: [] };
+    }
+  }
+  const r = collect({ p, now });
+  const state = { ...(readJson(p.state, {}) || {}), lastScanAt: r.scannedAt, actions: r.actions.length, skipped: r.skipped };
+  delete state.leaseUntil; // 旧版占用字段，改用 run.lock
+  if (!r.actions.length) {
+    state.lastRunCompletedAt = r.scannedAt;
+    if (runId) releaseLock(p, runId);
+    runId = null;
+  }
+  writeState(p, state);
+  return { ...r, runId };
+}
+
+// 先写临时文件再换名，读的一方不会读到半个文件
 function writeState(p, state) {
   fs.mkdirSync(p.dir, { recursive: true });
-  fs.writeFileSync(p.state, `${JSON.stringify(state, null, 2)}\n`);
+  const tmp = `${p.state}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+  fs.renameSync(tmp, p.state);
 }
 
-// 本轮处理完：记下完成时间、放开占用。体检按完成时间判断巡检是不是真的跑完了，不只是扫过
-export function done({ p, now = Date.now() }) {
+// 本轮处理完：记下完成时间，放开自己持有的占用。体检按完成时间判断巡检是不是真的跑完了，不只是扫过
+export function done({ p, now = Date.now(), runId = null }) {
   const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: new Date(now).toISOString() };
-  delete state.leaseUntil;
   writeState(p, state);
-  return state;
+  return { ...state, released: releaseLock(p, runId) };
 }
 
-// 动手前复核：按文件现状重新判断这个会话是否仍停在同一个锚点、没人接手。
+// 动手前复核：按文件现状重新判断这个会话是否仍停在同一个锚点、没人接手。state 四选一：
+//   still   仍停在原处，可以动手
+//   taken   锚点之后有人说过话（常浩或会话自己），确定有人接手：只有这一种能当「消息已送到」的依据
+//   moved   已归档、模型被换成别的、或停在了别处：这次停下已经不用管
+//   unknown 拿不准（找不到索引或记录、记录正在写入）：不动手，也不当作处理完，下一轮再看
 // model：这个会话此刻应有的模型（换模型之后复核时传备用模型）；不传就不比模型。
 // 桌面版没有「带条件修改」，复核只能缩小竞态窗口，不能完全消除。
 export function check({ p, sessionId, anchor, model }) {
+  const res = (state, reason, extra = {}) => ({ state, still: state === 'still', reason, ...extra });
   const file = listSessionFiles(p.sessions).find(f => path.basename(f) === `${sessionId}.json`);
   const s = file ? readJson(file, null) : null;
-  if (!s) return { still: false, reason: '找不到会话索引' };
-  if (s.isArchived) return { still: false, reason: '已归档' };
-  if (model && s.model !== model) return { still: false, reason: `模型已变成 ${s.model}` };
+  if (!s) return res('unknown', '找不到或读不出会话索引');
+  if (s.isArchived) return res('moved', '已归档');
+  if (model && s.model !== model) return res('moved', `模型已变成 ${s.model}`);
   const tr = findTranscript(p.projects, s.cliSessionId) || findTranscript(p.projects, s.lastAssistantCliSessionId);
-  const last = tr ? lastEntry(tr) : null;
-  if (last?.uncertain) return { still: false, reason: '会话记录正在写入' };
+  if (!tr) return res('unknown', '找不到会话记录');
+  const last = lastEntry(tr);
+  if (!last) return res('unknown', '会话记录读不出');
+  if (last.uncertain) return res('unknown', '会话记录正在写入');
+  if (last.at > Number(anchor) + 1000 && !last.apiError) return res('taken', '锚点之后有人说过话');
   const st = stoppedState(s, last);
-  if (!st) return { still: false, reason: '已经有人接手' };
-  if (st.anchor !== Number(anchor)) return { still: false, reason: '停在了别处（锚点变了）' };
-  return { still: true, kind: st.kind };
+  if (!st) return res('unknown', '不再像停下，但也看不出有人接手');
+  if (st.anchor !== Number(anchor)) return res(st.anchor > Number(anchor) ? 'moved' : 'unknown', `停在了别处（锚点 ${st.anchor}）`);
+  return res('still', '仍停在原处', { kind: st.kind });
 }
 
 // model_set：已换好模型、续跑消息还没发（不算处理完，下一轮只补发消息）
-const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'model_set']);
+// unsure：消息发送报错、又看不出送没送到。不自动重发（可能已送到），通知常浩看一眼；算处理完
+const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'model_set', 'unsure']);
 
 export function record({ p, now = Date.now(), args }) {
   if (!args.session || !(Number(args.anchor) > 0) || !ACTIONS.has(args.action) || !args.kind) {
@@ -384,7 +485,7 @@ export function selfUsage({ p, now = Date.now(), hours = 24, taskId = loadConfig
 }
 
 export function status({ p, now = Date.now() }) {
-  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
+  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), lock: lockInfo(p), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
 }
 
 export function setConfig({ p, args, now = Date.now() }) {
@@ -413,7 +514,7 @@ export function parseArgs(argv) {
 }
 
 const KIND = { model_limit: '单模型额度', account_limit: '账户额度', transient: '临时故障', needs_owner: '认证/订阅', other_error: '其他报错', background: '后台进行中' };
-const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', model_set: '已换模型待续跑' };
+const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', model_set: '已换模型待续跑', unsure: '发送结果不确定' };
 
 export function main(argv = process.argv.slice(2), env = process.env) {
   const args = parseArgs(argv);
@@ -430,11 +531,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
   if (cmd === 'done') {
-    console.log(JSON.stringify(done({ p })));
+    console.log(JSON.stringify(done({ p, runId: typeof args.run === 'string' ? args.run : null })));
     return 0;
   }
   if (cmd === 'backlog') {
-    const { backlog } = scan({ p });
+    const { backlog } = collect({ p });
     if (args.json) console.log(JSON.stringify(backlog, null, 2));
     else {
       console.log(`巡检启用前就停着、或停了超过 ${loadConfig(p).maxAgeDays} 天的会话：${backlog.length} 个（只列不动）`);
@@ -457,7 +558,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       const c = s.config;
       console.log(`备用模型：${c.backupModel || '不设（单模型额度用完只通知）'}　不碰分区：${c.excludeGroupName}　启用于：${c.startAt ? new Date(c.startAt).toISOString() : '未启用'}　每轮最多叫醒 ${c.maxWakePerRun} 个`);
       if (s.configState === 'broken') console.log('⚠ 设置文件读不出，正按默认值跑（不换模型、全部进存量）：重新运行 config 写一份');
-      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}`);
+      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}${s.lock ? `　正在跑：自 ${s.lock.at} 起（run ${s.lock.runId}）` : ''}`);
       const u = s.usage24h;
       const w = n => `${(n / 1e4).toFixed(1)} 万`;
       console.log(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}），输出 ${w(u.output)}`);
@@ -465,7 +566,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     }
     return 0;
   }
-  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | done | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
+  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | done [--run <runId>] | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
   return 2;
 }
 

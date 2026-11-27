@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { check, classifyError, done, family, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
+import { acquireLock, check, classifyError, collect, done, family, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
 
 const NOW = new Date(2026, 10, 27, 12, 0, 0).getTime(); // 本机时区 11-27 12:00
 const START = NOW - 48 * 36e5;
@@ -50,12 +50,17 @@ test('报错分类', () => {
   assert.equal(family('claude-fable-5-2'), 'fable');
 });
 
-test('重置时间：当天、跨天、带日期', () => {
-  const at = new Date(2026, 10, 27, 1, 0).getTime();
-  assert.equal(parseReset("resets 4:10am (Asia/Shanghai)", at), new Date(2026, 10, 27, 4, 10).getTime());
-  assert.equal(parseReset("resets 11pm (Asia/Shanghai)", at), new Date(2026, 10, 27, 23, 0).getTime());
-  assert.equal(parseReset("resets 12:40am", new Date(2026, 10, 27, 13, 0).getTime()), new Date(2026, 10, 28, 0, 40).getTime());
-  assert.equal(parseReset("resets Nov 28 at 2am (Asia/Shanghai)", at), new Date(2026, 10, 28, 2, 0).getTime());
+test('重置时间：按报错里的时区算，当天、跨天、带日期；没写时区按本机', () => {
+  const at = Date.UTC(2026, 10, 26, 17, 0); // 上海 11-27 01:00
+  assert.equal(parseReset('resets 4:10am (Asia/Shanghai)', at), Date.UTC(2026, 10, 26, 20, 10));
+  assert.equal(parseReset('resets 11pm (Asia/Shanghai)', at), Date.UTC(2026, 10, 27, 15, 0));
+  assert.equal(parseReset('resets 12:40am (Asia/Shanghai)', Date.UTC(2026, 10, 27, 5, 0)), Date.UTC(2026, 10, 27, 16, 40));
+  assert.equal(parseReset('resets Nov 28 at 2am (Asia/Shanghai)', at), Date.UTC(2026, 10, 27, 18, 0));
+  // 同一时刻，纽约时区（冬令时 UTC-5）：纽约 11-26 12:00 → 当天 4pm
+  assert.equal(parseReset('resets 4pm (America/New_York)', at), Date.UTC(2026, 10, 26, 21, 0));
+  const local = new Date(2026, 10, 27, 13, 0).getTime();
+  assert.equal(parseReset('resets 12:40am', local), new Date(2026, 10, 28, 0, 40).getTime());
+  assert.equal(parseReset('resets 3am (Not/AZone)', local), new Date(2026, 10, 28, 3, 0).getTime(), '认不出的时区按本机');
   assert.equal(parseReset('没有时间', at), null);
 });
 
@@ -151,41 +156,84 @@ test('会话记录末尾半行（正在写入）：不确定，不处理', () =>
   const r = scan({ p, now: NOW });
   assert.equal(r.actions.length, 0);
   assert.equal(r.skipped.transcriptBusy, 1);
-  assert.equal(check({ p, sessionId: 'local_w', anchor: NOW - 600e3 }).still, false);
+  assert.equal(check({ p, sessionId: 'local_w', anchor: NOW - 600e3 }).state, 'unknown');
 });
 
-test('动手前复核：仍停在原处才放行；有人接手、锚点变了、模型变了都拦下', () => {
+test('动手前复核分四种：still、taken、moved、unknown；只有确定有人说过话才算 taken', () => {
   const { p } = fake();
   configured(p);
   const at = NOW - 600e3;
   errSession(p, 'k', FABLE, at);
-  assert.deepEqual(check({ p, sessionId: 'local_k', anchor: at }), { still: true, kind: 'model_limit' });
-  assert.equal(check({ p, sessionId: 'local_k', anchor: at, model: 'claude-fable-5-2' }).still, true);
-  assert.match(check({ p, sessionId: 'local_k', anchor: at, model: 'claude-opus-5-5' }).reason, /模型/);
-  assert.match(check({ p, sessionId: 'local_k', anchor: at - 1 }).reason, /锚点/);
-  assert.match(check({ p, sessionId: 'local_nope', anchor: at }).reason, /找不到/);
-  fs.appendFileSync(path.join(p.projects, '-Users-x-proj', 'cli-k.jsonl'), `${JSON.stringify({ type: 'user', timestamp: new Date(NOW - 60e3).toISOString(), message: { content: '我自己接着说' } })}\n`);
-  assert.match(check({ p, sessionId: 'local_k', anchor: at }).reason, /接手/);
+  const c = (o = {}) => check({ p, sessionId: 'local_k', anchor: at, ...o });
+  assert.equal(c().state, 'still');
+  assert.equal(c().kind, 'model_limit');
+  assert.equal(c({ model: 'claude-fable-5-2' }).state, 'still');
+  assert.equal(c({ model: 'claude-opus-5-5' }).state, 'moved');
+  assert.equal(c({ anchor: at - 5000 }).state, 'moved', '停在了更晚的地方');
+  assert.equal(check({ p, sessionId: 'local_nope', anchor: at }).state, 'unknown');
+  const tr = path.join(p.projects, '-Users-x-proj', 'cli-k.jsonl');
+  const saved = fs.readFileSync(tr);
+  fs.unlinkSync(tr);
+  assert.equal(c().state, 'unknown', '找不到会话记录不能当作有人接手');
+  fs.writeFileSync(tr, '');
+  assert.equal(c().state, 'unknown', '会话记录读不出不能当作有人接手');
+  fs.writeFileSync(tr, saved);
+  fs.appendFileSync(tr, `${JSON.stringify({ type: 'user', timestamp: new Date(NOW - 60e3).toISOString(), message: { content: '我自己接着说' } })}\n`);
+  assert.equal(c().state, 'taken');
 });
 
-test('占用：上一轮没跑完时这一轮不处理；done 或空轮记完成、放开占用', () => {
+test('占用：别人占着这一轮跳过；只有持有者能放开；过期的清掉再占；空轮当场放开', () => {
   const { p } = fake();
   configured(p);
   errSession(p, 'l', 'API Error: Connection lost mid-response.', NOW - 600e3, { model: 'claude-opus-5-5' });
-  assert.equal(scan({ p, now: NOW, lease: true }).actions.length, 1);
+  const first = scan({ p, now: NOW, lease: true });
+  assert.equal(first.actions.length, 1);
+  assert.ok(first.runId);
   const second = scan({ p, now: NOW + 60e3, lease: true });
   assert.equal(second.actions.length, 0);
   assert.equal(second.skipped.leased, 1);
-  assert.equal(scan({ p, now: NOW + 31 * 60e3, lease: true }).actions.length, 1, '占用超过 30 分钟算上一轮死掉');
-  const st = done({ p, now: NOW + 32 * 60e3 });
-  assert.equal(st.leaseUntil, undefined);
+  assert.equal(second.busySince, new Date(NOW).toISOString());
+  assert.equal(done({ p, now: NOW + 2 * 60e3, runId: 'someone-else' }).released, false, '不是持有者放不开');
+  assert.equal(scan({ p, now: NOW + 3 * 60e3, lease: true }).skipped.leased, 1);
+  const third = scan({ p, now: NOW + 31 * 60e3, lease: true });
+  assert.equal(third.actions.length, 1, '占用超过 30 分钟算上一轮死掉');
+  assert.equal(done({ p, now: NOW + 32 * 60e3, runId: first.runId }).released, false, '旧持有者不能放开新一轮的占用');
+  const st = done({ p, now: NOW + 32 * 60e3, runId: third.runId });
+  assert.equal(st.released, true);
   assert.equal(st.lastRunCompletedAt, new Date(NOW + 32 * 60e3).toISOString());
-  assert.equal(scan({ p, now: NOW + 33 * 60e3, lease: true }).actions.length, 1);
+  assert.ok(scan({ p, now: NOW + 33 * 60e3, lease: true }).runId);
   const { p: p2 } = fake();
-  scan({ p: p2, now: NOW, lease: true });
-  const s2 = status({ p: p2, now: NOW }).state;
-  assert.equal(s2.lastRunCompletedAt, new Date(NOW).toISOString(), '空轮直接算跑完');
-  assert.equal(s2.leaseUntil, undefined);
+  assert.equal(scan({ p: p2, now: NOW, lease: true }).runId, null);
+  const s2 = status({ p: p2, now: NOW });
+  assert.equal(s2.state.lastRunCompletedAt, new Date(NOW).toISOString(), '空轮直接算跑完');
+  assert.equal(s2.lock, null, '空轮放开占用');
+});
+
+test('占用是原子的：8 个进程同一时刻抢，只有 1 个抢到', async () => {
+  const { p, env } = fake();
+  const mod = path.join(import.meta.dirname, '..', 'tools', 'session-sweep.mjs');
+  const go = Date.now() + 1500; // 各进程都等到这一刻再抢，让抢锁真正同时发生
+  const code = `import { acquireLock, paths } from ${JSON.stringify(mod)}; const p = paths(process.env, ${JSON.stringify(path.dirname(p.dir))}); while (Date.now() < ${go}); console.log(acquireLock(p) ? 'got' : 'busy');`;
+  const one = () => new Promise(resolve => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, ...env } });
+    let out = '';
+    c.stdout.on('data', d => (out += d));
+    c.on('close', () => resolve(out.trim()));
+  });
+  const got = await Promise.all(Array.from({ length: 8 }, one));
+  assert.equal(got.filter(x => x === 'got').length, 1, got.join(','));
+  assert.equal(got.filter(x => x === 'busy').length, 7);
+});
+
+test('backlog 只读：不写检查时间、完成时间，不碰占用', () => {
+  const { p } = fake();
+  configured(p);
+  errSession(p, 'old', FABLE, START - 36e5);
+  const runId = acquireLock(p, NOW);
+  const before = fs.existsSync(p.state) ? fs.readFileSync(p.state, 'utf8') : null;
+  assert.equal(collect({ p, now: NOW }).backlog.length, 1);
+  assert.equal(fs.existsSync(p.state) ? fs.readFileSync(p.state, 'utf8') : null, before);
+  assert.equal(status({ p, now: NOW }).lock.runId, runId);
 });
 
 test('留痕、设置、状态', () => {
