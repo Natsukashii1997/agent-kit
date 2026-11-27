@@ -4,7 +4,9 @@
 // 换模型、发消息由定时任务用桌面版的会话管理工具做（launchd 调不到那些工具）。
 //   node tools/session-sweep.mjs scan [--lease]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--lease 先原子地占住本轮（输出 runId；别人占着就不处理）
 //   node tools/session-sweep.mjs check --session <id> --anchor <毫秒> [--model <模型>]   动手前复核：still（仍停在原处）/ taken（有人接手）/ moved（停在了别处）/ unknown（拿不准）
-//   node tools/session-sweep.mjs done [--run <runId>]  本轮处理完，记下完成时间；带 --run 时放开自己持有的占用
+//   node tools/session-sweep.mjs beat --run <runId>   心跳：续租自己持有的占用（处理每一项前调一次）
+//   node tools/session-sweep.mjs done --run <runId>   本轮处理完：只有占用的持有者才能记完成时间、放开占用
+//   node tools/session-sweep.mjs resolve --session <id> --anchor <毫秒>   常浩确认「发送结果不确定」的那一项已经处理过
 //   node tools/session-sweep.mjs record --session <id> --anchor <毫秒> --kind <类别> --action <动作> [--from <模型>] [--to <模型>] [--note <说明>]
 //   node tools/session-sweep.mjs backlog [--json]   巡检启用前就停着的、或超出时间窗的会话清单（只列不动，给常浩过目）
 //   node tools/session-sweep.mjs status [--json]    设置、上次检查、自身花费、最近留痕
@@ -27,7 +29,8 @@ export const DEFAULT_CONFIG = {
 const WAKE = new Set(['switch', 'continue', 'nudge']);
 const ACCOUNT_LIMITS = /^(5-hour|session|weekly|daily|monthly|usage|spend)\b/i;
 const MAX_FAILS = 2;
-const LEASE_MS = 30 * 60e3; // 一轮最长占用多久；超过就当上一轮已经死掉
+const LEASE_MS = 30 * 60e3; // 占用多久没续租就当上一轮已经死掉（按锁文件的修改时间算，任务每处理一项续租一次）
+const TAKEOVER_MS = 60e3; // 接管过期锁时的短锁，超过这么久算接管者死掉
 
 export function paths(env = process.env, home = os.homedir()) {
   const dir = path.join(stateDir(env, process.platform, home), 'session-sweep');
@@ -37,6 +40,7 @@ export function paths(env = process.env, home = os.homedir()) {
     log: path.join(dir, 'log.jsonl'),
     state: path.join(dir, 'state.json'),
     lock: path.join(dir, 'run.lock'),
+    takeover: path.join(dir, 'run.lock.takeover'),
     sessions: env.SESSION_SWEEP_SESSIONS_DIR || path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     projects: env.SESSION_SWEEP_PROJECTS_DIR || path.join(home, '.claude', 'projects'),
   };
@@ -111,9 +115,9 @@ const validTz = tz => {
 // 「resets 4:10am (Asia/Shanghai)」「resets Nov 28 at 2am (…)」→ 报错之后的那个重置时刻。
 // 按报错括号里的时区算；没写或认不出时区，按本机时区。认不出时间返回 null
 export function parseReset(text, errorAt) {
-  const m = String(text || '').match(/resets (?:([A-Z][a-z]{2}) (\d{1,2}) at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z_]+\/[A-Za-z_\/+-]+)\))?/i);
+  const m = String(text || '').match(/resets (?:([A-Z][a-z]{2}) (\d{1,2}) at )?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?/i);
   if (!m) return null;
-  const tz = m[6] && validTz(m[6]) ? m[6] : null;
+  const tz = m[6] && validTz(m[6].trim()) ? m[6].trim() : null;
   let h = Number(m[3]) % 12;
   if (m[5].toLowerCase() === 'pm') h += 12;
   const mi = Number(m[4] || 0);
@@ -210,18 +214,21 @@ export function lastEntry(file) {
     if (d.type !== 'user' && d.type !== 'assistant') continue;
     if (d.isMeta || isToolResult(d)) continue;
     if (d.type === 'assistant' && !d.isApiErrorMessage && !textOf(d).trim()) continue;
-    return { type: d.type, at: Date.parse(d.timestamp) || 0, apiError: d.isApiErrorMessage === true ? d.error || 'api' : null, text: textOf(d) };
+    const at = Date.parse(d.timestamp);
+    return { type: d.type, at: Number.isNaN(at) ? null : at, apiError: d.isApiErrorMessage === true ? d.error || 'api' : null, text: textOf(d) };
   }
   return null;
 }
 
 // 一个会话现在是不是「停下了、没人接」；是的话返回原因和锚点（停下的时刻）
 export function stoppedState(s, last) {
-  if (last?.uncertain) return null;
+  // 状态不确定（末尾半行、最后一条没有时间戳）：不当作停下，也不当作有人接手
+  if (last?.uncertain || (last && last.at == null)) return null;
   if (s.error) {
     const errorAt = s.errorAt || s.errorRows?.at || 0;
-    // 报错之后有人说过话（含 /model 这类命令）：已经有人接手了
-    if (!last || (last.type === 'user' && last.at > errorAt + 1000)) return null;
+    // 报错之后有人说过话（含 /model 这类命令）：已经有人接手了。
+    // 人发的消息只要晚于报错就算；助手文字留 1 秒容差（报错前那一轮的文字时间戳可能略晚于索引里的报错时间）
+    if (!last || (last.type === 'user' && last.at > errorAt)) return null;
     if (last.type === 'assistant' && !last.apiError && last.at > errorAt + 1000) return null;
     return { ...classifyError(s.error, s.errorCategory), anchor: errorAt, errorText: s.error };
   }
@@ -231,32 +238,69 @@ export function stoppedState(s, last) {
 
 const keyOf = (sessionId, anchor) => `${sessionId}@${anchor}`;
 
-// 原子占用：独占创建 run.lock。别人占着且没过期就返回 null；过期的（上一轮死掉）清掉再占
+// 原子占用：独占创建 run.lock（open 'wx'）。别人占着就返回 null。
+// 锁多久没续租（按文件修改时间，不依赖锁里的内容，空文件也能回收）超过 LEASE_MS，算上一轮死掉：
+// 先独占创建短锁 run.lock.takeover，拿到短锁的才可以删过期锁，删前再核一次仍过期；删完再按 'wx' 抢。
 export function acquireLock(p, now = Date.now()) {
   fs.mkdirSync(p.dir, { recursive: true });
   const runId = `${now.toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const tryCreate = () => {
     try {
       const fd = fs.openSync(p.lock, 'wx');
       fs.writeSync(fd, JSON.stringify({ runId, at: new Date(now).toISOString() }));
       fs.closeSync(fd);
-      return runId;
+      fs.utimesSync(p.lock, now / 1000, now / 1000);
+      return true;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
-      const held = readJson(p.lock, null);
-      const at = Date.parse(held?.at);
-      // 读不出或没过期：当作别人占着（读不出可能是对方刚创建、还没写完）
-      if (!(now - at > LEASE_MS)) return null;
+      return false;
+    }
+  };
+  if (tryCreate()) return runId;
+  const age = file => {
+    try {
+      return now - fs.statSync(file).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
+  if (!(age(p.lock) > LEASE_MS)) return null;
+  // 接管者自己死在短锁里的：短锁过期就清掉（窗口只有毫秒级的接管过程）
+  if (age(p.takeover) > TAKEOVER_MS) {
+    try {
+      fs.unlinkSync(p.takeover);
+    } catch {}
+  }
+  let fd;
+  try {
+    fd = fs.openSync(p.takeover, 'wx');
+  } catch (e) {
+    if (e.code === 'EEXIST') return null; // 别人正在接管
+    throw e;
+  }
+  try {
+    fs.closeSync(fd);
+    fs.utimesSync(p.takeover, now / 1000, now / 1000);
+    if (age(p.lock) > LEASE_MS) {
       try {
-        // 只删自己看到的那把过期锁：换名后核对内容，不是它就放回
-        const tmp = `${p.lock}.stale-${runId}`;
-        fs.renameSync(p.lock, tmp);
-        if (readJson(tmp, null)?.runId !== held.runId) fs.renameSync(tmp, p.lock);
-        else fs.unlinkSync(tmp);
+        fs.unlinkSync(p.lock);
       } catch {}
     }
+    return tryCreate() ? runId : null;
+  } finally {
+    try {
+      fs.unlinkSync(p.takeover);
+    } catch {}
   }
-  return null;
+}
+
+const holds = (p, runId) => Boolean(runId) && readJson(p.lock, null)?.runId === runId;
+
+// 心跳：持有者续租，返回是否仍持有
+export function beat(p, runId, now = Date.now()) {
+  if (!holds(p, runId)) return false;
+  fs.utimesSync(p.lock, now / 1000, now / 1000);
+  return true;
 }
 
 export function lockInfo(p) {
@@ -265,8 +309,7 @@ export function lockInfo(p) {
 
 // 只放开自己持有的占用
 export function releaseLock(p, runId) {
-  const held = readJson(p.lock, null);
-  if (!runId || held?.runId !== runId) return false;
+  if (!holds(p, runId)) return false;
   try {
     fs.unlinkSync(p.lock);
     return true;
@@ -281,10 +324,12 @@ export function collect({ p, now = Date.now() }) {
   const log = readLog(p);
   const fails = {};
   const handled = new Set();
-  const modelSet = new Set(); // 已经换好模型、还没发出续跑消息的
+  // 换模型的意图（switching，换之前记）或已换好（model_set）、还没发出续跑消息的
+  const modelSet = new Set();
   for (const r of log) {
     const k = keyOf(r.sessionId, r.anchor);
-    if (r.action === 'model_set') modelSet.add(k);
+    if (r.action === 'model_set' || r.action === 'switching') modelSet.add(k);
+    else if (r.action === 'resolved') continue;
     else if (r.action !== 'failed') handled.add(k);
     else if ((fails[k] = (fails[k] || 0) + 1) >= MAX_FAILS) handled.add(k);
   }
@@ -299,7 +344,7 @@ export function collect({ p, now = Date.now() }) {
     if (!s?.sessionId || s.isArchived || s.scheduledTaskId) continue;
     const tr = findTranscript(p.projects, s.cliSessionId) || findTranscript(p.projects, s.lastAssistantCliSessionId);
     const last = tr ? lastEntry(tr) : null;
-    if (last?.uncertain) {
+    if (last?.uncertain || (last && last.at == null)) {
       skip('transcriptBusy');
       continue;
     }
@@ -322,7 +367,7 @@ export function collect({ p, now = Date.now() }) {
       reason = `${st.errorText.match(/hit your (.+?) limit/)?.[1] || ''} 额度用完`;
       const key = keyOf(s.sessionId, st.anchor);
       if (modelSet.has(key) && config.backupModel && family(s.model) === family(config.backupModel)) {
-        // 上一轮已经换好模型，但续跑消息没发出去：这一轮只补发消息，不再换模型
+        // 上一轮记过换模型的意图、会话现在已在备用模型上（换模型生效了，留痕或消息没跟上）：这一轮只补发消息，不再换模型
         candidates.push({ ...item, action: 'switch', to: s.model, modelAlreadySet: true, reason: `${reason}；上一轮已换到 ${s.model}，补发续跑消息` });
         continue;
       }
@@ -391,12 +436,13 @@ export function scan({ p, now = Date.now(), lease = false }) {
   const r = collect({ p, now });
   const state = { ...(readJson(p.state, {}) || {}), lastScanAt: r.scannedAt, actions: r.actions.length, skipped: r.skipped };
   delete state.leaseUntil; // 旧版占用字段，改用 run.lock
-  if (!r.actions.length) {
-    state.lastRunCompletedAt = r.scannedAt;
-    if (runId) releaseLock(p, runId);
+  if (!r.actions.length) state.lastRunCompletedAt = r.scannedAt;
+  writeState(p, state);
+  // 先写状态再放开占用：放开之后才可能有下一轮来写状态，不会被这一轮的旧状态盖掉
+  if (!r.actions.length && runId) {
+    releaseLock(p, runId);
     runId = null;
   }
-  writeState(p, state);
   return { ...r, runId };
 }
 
@@ -408,11 +454,22 @@ function writeState(p, state) {
   fs.renameSync(tmp, p.state);
 }
 
-// 本轮处理完：记下完成时间，放开自己持有的占用。体检按完成时间判断巡检是不是真的跑完了，不只是扫过
+// 本轮处理完：只有占用的持有者才能记完成时间、放开占用（被接管的旧一轮不能把新一轮记成跑完）。
+// 体检按完成时间判断巡检是不是真的跑完了，不只是扫过
 export function done({ p, now = Date.now(), runId = null }) {
+  if (!holds(p, runId)) return { released: false, reason: '不是当前占用的持有者，没记完成时间' };
   const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: new Date(now).toISOString() };
   writeState(p, state);
   return { ...state, released: releaseLock(p, runId) };
+}
+
+// 还没了结的「发送结果不确定」：没被 resolve，会话也还没被人接上（复核仍是 still 或 unknown）。不随时间过期
+export function openUnsure(p) {
+  const log = readLog(p);
+  const resolved = new Set(log.filter(r => r.action === 'resolved').map(r => keyOf(r.sessionId, r.anchor)));
+  const seen = new Map();
+  for (const r of log) if (r.action === 'unsure' && !resolved.has(keyOf(r.sessionId, r.anchor))) seen.set(keyOf(r.sessionId, r.anchor), r);
+  return [...seen.values()].filter(r => ['still', 'unknown'].includes(check({ p, sessionId: r.sessionId, anchor: r.anchor }).state));
 }
 
 // 动手前复核：按文件现状重新判断这个会话是否仍停在同一个锚点、没人接手。state 四选一：
@@ -434,7 +491,9 @@ export function check({ p, sessionId, anchor, model }) {
   const last = lastEntry(tr);
   if (!last) return res('unknown', '会话记录读不出');
   if (last.uncertain) return res('unknown', '会话记录正在写入');
-  if (last.at > Number(anchor) + 1000 && !last.apiError) return res('taken', '锚点之后有人说过话');
+  if (last.at == null) return res('unknown', '最后一条消息没有时间戳，分不清先后');
+  // 人发的消息晚于锚点就算接手；助手文字留 1 秒容差（同 stoppedState）
+  if (!last.apiError && (last.type === 'user' ? last.at > Number(anchor) : last.at > Number(anchor) + 1000)) return res('taken', '锚点之后有人说过话');
   const st = stoppedState(s, last);
   if (!st) return res('unknown', '不再像停下，但也看不出有人接手');
   if (st.anchor !== Number(anchor)) return res(st.anchor > Number(anchor) ? 'moved' : 'unknown', `停在了别处（锚点 ${st.anchor}）`);
@@ -442,8 +501,11 @@ export function check({ p, sessionId, anchor, model }) {
 }
 
 // model_set：已换好模型、续跑消息还没发（不算处理完，下一轮只补发消息）
-// unsure：消息发送报错、又看不出送没送到。不自动重发（可能已送到），通知常浩看一眼；算处理完
-const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'model_set', 'unsure']);
+// switching：换模型之前记的意图（换完来不及记 model_set 就崩了，下一轮也知道是巡检换的）
+// unsure：消息发送报错、又看不出送没送到。不自动重发（可能已送到）；是未决事项，体检一直报，直到会话被接上或 resolve
+// taken：发送报错，但复核看到锚点之后已有人说话（不等于本次消息送到），不用再发
+// resolved：常浩确认 unsure 那一项处理过了
+const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'switching', 'model_set', 'unsure', 'taken', 'resolved']);
 
 export function record({ p, now = Date.now(), args }) {
   if (!args.session || !(Number(args.anchor) > 0) || !ACTIONS.has(args.action) || !args.kind) {
@@ -485,7 +547,7 @@ export function selfUsage({ p, now = Date.now(), hours = 24, taskId = loadConfig
 }
 
 export function status({ p, now = Date.now() }) {
-  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), lock: lockInfo(p), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
+  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), lock: lockInfo(p), openUnsure: openUnsure(p), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
 }
 
 export function setConfig({ p, args, now = Date.now() }) {
@@ -514,7 +576,7 @@ export function parseArgs(argv) {
 }
 
 const KIND = { model_limit: '单模型额度', account_limit: '账户额度', transient: '临时故障', needs_owner: '认证/订阅', other_error: '其他报错', background: '后台进行中' };
-const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', model_set: '已换模型待续跑', unsure: '发送结果不确定' };
+const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', switching: '准备换模型', model_set: '已换模型待续跑', unsure: '发送结果不确定', taken: '已有人接手', resolved: '已确认处理' };
 
 export function main(argv = process.argv.slice(2), env = process.env) {
   const args = parseArgs(argv);
@@ -532,6 +594,15 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   }
   if (cmd === 'done') {
     console.log(JSON.stringify(done({ p, runId: typeof args.run === 'string' ? args.run : null })));
+    return 0;
+  }
+  if (cmd === 'beat') {
+    const ok = beat(p, typeof args.run === 'string' ? args.run : null);
+    console.log(JSON.stringify({ holding: ok }));
+    return ok ? 0 : 1;
+  }
+  if (cmd === 'resolve') {
+    console.log(JSON.stringify(record({ p, args: { ...args, kind: args.kind || 'manual', action: 'resolved', note: args.note || '常浩确认已处理' } })));
     return 0;
   }
   if (cmd === 'backlog') {
@@ -562,11 +633,15 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       const u = s.usage24h;
       const w = n => `${(n / 1e4).toFixed(1)} 万`;
       console.log(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}），输出 ${w(u.output)}`);
+      if (s.openUnsure.length) {
+        console.log(`⚠ 发消息结果不确定、还没了结的 ${s.openUnsure.length} 项（去看一眼；处理过就运行 resolve --session <id> --anchor <毫秒>）：`);
+        for (const r of s.openUnsure) console.log(`  ${r.at}  ${r.sessionId}  anchor ${r.anchor}  ${r.note}`);
+      }
       for (const r of s.recent) console.log(`${r.at}  ${SHOW[r.action] || r.action}  ${KIND[r.kind] || r.kind}  ${r.sessionId}  ${r.from || ''}${r.to ? ` → ${r.to}` : ''}  ${r.note}`);
     }
     return 0;
   }
-  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | done [--run <runId>] | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
+  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | beat --run <runId> | done --run <runId> | resolve --session <id> --anchor <毫秒> | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
   return 2;
 }
 

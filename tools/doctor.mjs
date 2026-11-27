@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { inspect } from './global-instructions.mjs';
-import { paths as sweepPaths, selfUsage } from './session-sweep.mjs';
+import { openUnsure, paths as sweepPaths, selfUsage } from './session-sweep.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -358,10 +358,11 @@ function checkSessionSweep({ now, dir, env, home }) {
   });
   const recent = rows.filter(r => now - Date.parse(r.at) <= 864e5);
   // 失败后下一轮重试成功的，不再算失败
-  const done = new Set(rows.filter(r => ['switched', 'continued', 'nudged'].includes(r.action)).map(r => `${r.sessionId}@${r.anchor}`));
+  const done = new Set(rows.filter(r => ['switched', 'continued', 'nudged', 'taken'].includes(r.action)).map(r => `${r.sessionId}@${r.anchor}`));
   const count = a => recent.filter(r => r.action === a && !(a === 'failed' && done.has(`${r.sessionId}@${r.anchor}`))).length;
   if (recent.length) detail.push(`最近 24 小时：换模型续跑 ${count('switched')}、续跑 ${count('continued')}、催核对 ${count('nudged')}、只通知 ${count('notified')}、失败 ${count('failed')}、不确定 ${count('unsure')}、排除 ${count('excluded')}（node tools/session-sweep.mjs status 看明细）`);
-  const u = selfUsage({ p: { ...sweepPaths(env, home), dir: sdir }, now, taskId: cfg.taskId || 'quota-guard' });
+  const sp = { ...sweepPaths(env, home), dir: sdir, config: path.join(sdir, 'config.json'), log: path.join(sdir, 'log.jsonl'), state: path.join(sdir, 'state.json'), lock: path.join(sdir, 'run.lock') };
+  const u = selfUsage({ p: sp, now, taskId: cfg.taskId || 'quota-guard' });
   if (u.runs) detail.push(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
   let status = 'ok';
   if (!(mins <= 45)) {
@@ -375,9 +376,11 @@ function checkSessionSweep({ now, dir, env, home }) {
   }
   const lock = jsonOr(readText(path.join(sdir, 'run.lock')), null);
   if (lock?.at) detail.push(`正在跑：自 ${Math.round((now - Date.parse(lock.at)) / 60e3)} 分钟前起`);
-  if (count('unsure')) {
+  // 发消息结果不确定的是未决事项：不随 24 小时过期，直到会话被人接上或常浩 resolve
+  const open = openUnsure(sp);
+  if (open.length) {
     status = 'warn';
-    detail.push(`最近 24 小时有 ${count('unsure')} 次发消息结果不确定（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼`);
+    detail.push(`有 ${open.length} 项发消息结果不确定、还没了结（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼；处理过就 resolve`);
   }
   if (count('failed')) status = 'warn';
   return { name, status, detail };

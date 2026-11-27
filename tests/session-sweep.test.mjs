@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { acquireLock, check, classifyError, collect, done, family, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
+import { acquireLock, beat, check, classifyError, collect, done, family, openUnsure, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
 
 const NOW = new Date(2026, 10, 27, 12, 0, 0).getTime(); // 本机时区 11-27 12:00
 const START = NOW - 48 * 36e5;
@@ -60,6 +60,7 @@ test('重置时间：按报错里的时区算，当天、跨天、带日期；�
   assert.equal(parseReset('resets 4pm (America/New_York)', at), Date.UTC(2026, 10, 26, 21, 0));
   const local = new Date(2026, 10, 27, 13, 0).getTime();
   assert.equal(parseReset('resets 12:40am', local), new Date(2026, 10, 28, 0, 40).getTime());
+  assert.equal(parseReset('resets 4pm (Etc/GMT+8)', at), Date.UTC(2026, 10, 27, 0, 0), '带数字的 IANA 时区（Etc/GMT+8 即 UTC-8）');
   assert.equal(parseReset('resets 3am (Not/AZone)', local), new Date(2026, 10, 28, 3, 0).getTime(), '认不出的时区按本机');
   assert.equal(parseReset('没有时间', at), null);
 });
@@ -148,6 +149,61 @@ test('分阶段留痕：换好模型没发出消息的，下一轮只补发消�
   assert.equal(scan({ p, now: NOW }).actions.length, 0);
 });
 
+test('换模型前记了意图、换完没来得及记 model_set 就崩了：下一轮仍只补发消息', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'cr', FABLE, at, { model: 'claude-opus-5-5' });
+  record({ p, now: NOW, args: { session: 'local_cr', anchor: String(at), kind: 'model_limit', action: 'switching', from: 'claude-fable-5-2', to: 'claude-opus-5-5' } });
+  const a = scan({ p, now: NOW }).actions[0];
+  assert.equal(a.action, 'switch');
+  assert.equal(a.modelAlreadySet, true);
+});
+
+test('意图记了但换模型失败（模型没变）：照常换模型重试', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'sf', FABLE, at);
+  record({ p, now: NOW, args: { session: 'local_sf', anchor: String(at), kind: 'model_limit', action: 'switching' } });
+  record({ p, now: NOW, args: { session: 'local_sf', anchor: String(at), kind: 'model_limit', action: 'failed' } });
+  const a = scan({ p, now: NOW }).actions[0];
+  assert.equal(a.action, 'switch');
+  assert.equal(a.modelAlreadySet, false);
+});
+
+test('时间边界：报错后 1 秒内人发的消息算接手；最后一条没有时间戳算拿不准', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'q', FABLE, at, { rows: [user(at + 500, '我马上接着说')] });
+  assert.equal(check({ p, sessionId: 'local_q', anchor: at }).state, 'taken');
+  assert.equal(scan({ p, now: NOW }).actions.length, 0);
+  errSession(p, 'nt', FABLE, at);
+  fs.appendFileSync(path.join(p.projects, '-Users-x-proj', 'cli-nt.jsonl'), `${JSON.stringify({ type: 'user', message: { content: '没有时间戳' } })}\n`);
+  assert.equal(check({ p, sessionId: 'local_nt', anchor: at }).state, 'unknown');
+  const r = scan({ p, now: NOW });
+  assert.equal(r.actions.length, 0);
+  assert.equal(r.skipped.transcriptBusy, 1);
+});
+
+test('发送结果不确定是未决事项：不再自动处理，但一直在未决清单里，直到会话被接上或 resolve', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'un', 'API Error: Connection lost mid-response.', at, { model: 'claude-opus-5-5' });
+  record({ p, now: NOW - 48 * 36e5, args: { session: 'local_un', anchor: String(at), kind: 'transient', action: 'unsure', note: '发消息报错' } });
+  assert.equal(scan({ p, now: NOW }).actions.length, 0, '不自动重发');
+  assert.equal(openUnsure(p).length, 1, '超过 24 小时仍在');
+  assert.equal(status({ p, now: NOW }).openUnsure.length, 1);
+  record({ p, now: NOW, args: { session: 'local_un', anchor: String(at), kind: 'manual', action: 'resolved' } });
+  assert.equal(openUnsure(p).length, 0);
+  // 没 resolve、但会话后来被人接上了：也算了结
+  errSession(p, 'un2', 'API Error: Connection lost mid-response.', at, { model: 'claude-opus-5-5', rows: [user(at + 60e3, '我来')] });
+  record({ p, now: NOW, args: { session: 'local_un2', anchor: String(at), kind: 'transient', action: 'unsure' } });
+  assert.equal(openUnsure(p).length, 0);
+});
+
 test('会话记录末尾半行（正在写入）：不确定，不处理', () => {
   const { p } = fake();
   configured(p);
@@ -193,11 +249,15 @@ test('占用：别人占着这一轮跳过；只有持有者能放开；过期�
   assert.equal(second.actions.length, 0);
   assert.equal(second.skipped.leased, 1);
   assert.equal(second.busySince, new Date(NOW).toISOString());
+  const before = fs.readFileSync(p.state, 'utf8');
   assert.equal(done({ p, now: NOW + 2 * 60e3, runId: 'someone-else' }).released, false, '不是持有者放不开');
+  assert.equal(fs.readFileSync(p.state, 'utf8'), before, '不是持有者也不能记完成时间');
   assert.equal(scan({ p, now: NOW + 3 * 60e3, lease: true }).skipped.leased, 1);
   const third = scan({ p, now: NOW + 31 * 60e3, lease: true });
   assert.equal(third.actions.length, 1, '占用超过 30 分钟算上一轮死掉');
+  const mid = fs.readFileSync(p.state, 'utf8');
   assert.equal(done({ p, now: NOW + 32 * 60e3, runId: first.runId }).released, false, '旧持有者不能放开新一轮的占用');
+  assert.equal(fs.readFileSync(p.state, 'utf8'), mid, '旧持有者不能把新一轮记成跑完');
   const st = done({ p, now: NOW + 32 * 60e3, runId: third.runId });
   assert.equal(st.released, true);
   assert.equal(st.lastRunCompletedAt, new Date(NOW + 32 * 60e3).toISOString());
@@ -209,11 +269,11 @@ test('占用：别人占着这一轮跳过；只有持有者能放开；过期�
   assert.equal(s2.lock, null, '空轮放开占用');
 });
 
-test('占用是原子的：8 个进程同一时刻抢，只有 1 个抢到', async () => {
-  const { p, env } = fake();
+// 8 个子进程等到同一时刻，各自 acquireLock 一次；返回抢到的个数
+async function race(p, env, now) {
   const mod = path.join(import.meta.dirname, '..', 'tools', 'session-sweep.mjs');
-  const go = Date.now() + 1500; // 各进程都等到这一刻再抢，让抢锁真正同时发生
-  const code = `import { acquireLock, paths } from ${JSON.stringify(mod)}; const p = paths(process.env, ${JSON.stringify(path.dirname(p.dir))}); while (Date.now() < ${go}); console.log(acquireLock(p) ? 'got' : 'busy');`;
+  const go = Date.now() + 1500;
+  const code = `import { acquireLock, paths } from ${JSON.stringify(mod)}; const p = paths(process.env, ${JSON.stringify(path.dirname(p.dir))}); while (Date.now() < ${go}); console.log(acquireLock(p${now ? `, ${now}` : ''}) ? 'got' : 'busy');`;
   const one = () => new Promise(resolve => {
     const c = spawn(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, ...env } });
     let out = '';
@@ -221,8 +281,46 @@ test('占用是原子的：8 个进程同一时刻抢，只有 1 个抢到', asy
     c.on('close', () => resolve(out.trim()));
   });
   const got = await Promise.all(Array.from({ length: 8 }, one));
-  assert.equal(got.filter(x => x === 'got').length, 1, got.join(','));
-  assert.equal(got.filter(x => x === 'busy').length, 7);
+  assert.equal(got.filter(x => x === 'busy').length + got.filter(x => x === 'got').length, 8, got.join(','));
+  return got.filter(x => x === 'got').length;
+}
+const age = (file, ms) => {
+  const t = (Date.now() - ms) / 1000;
+  fs.utimesSync(file, t, t);
+};
+
+test('占用是原子的：8 个进程同一时刻抢空锁，只有 1 个抢到', async () => {
+  const { p, env } = fake();
+  assert.equal(await race(p, env), 1);
+});
+
+test('过期锁接管：8 个进程同时接管同一把过期锁，只有 1 个抢到；空锁文件过期也能回收', async () => {
+  const { p, env } = fake();
+  fs.mkdirSync(p.dir, { recursive: true });
+  fs.writeFileSync(p.lock, JSON.stringify({ runId: 'dead', at: new Date(Date.now() - 40 * 60e3).toISOString() }));
+  age(p.lock, 40 * 60e3);
+  assert.equal(await race(p, env), 1);
+  assert.notEqual(JSON.parse(fs.readFileSync(p.lock, 'utf8')).runId, 'dead');
+  const { p: p2, env: env2 } = fake();
+  fs.mkdirSync(p2.dir, { recursive: true });
+  fs.writeFileSync(p2.lock, ''); // 创建锁后、写内容前崩掉
+  age(p2.lock, 40 * 60e3);
+  assert.equal(await race(p2, env2), 1);
+});
+
+test('心跳续租：持有者续租后不会被当成过期；接管者死在短锁里的，短锁过期后能回收', () => {
+  const { p } = fake();
+  const now = Date.now();
+  const id = acquireLock(p, now - 40 * 60e3);
+  assert.ok(id);
+  assert.equal(beat(p, id, now), true);
+  assert.equal(acquireLock(p, now), null, '续过租，没过期');
+  assert.equal(beat(p, 'other', now), false);
+  age(p.lock, 40 * 60e3);
+  fs.writeFileSync(p.takeover, '');
+  age(p.takeover, 2 * 60e3);
+  assert.ok(acquireLock(p, now), '过期锁 + 过期短锁都能回收');
+  assert.equal(fs.existsSync(p.takeover), false);
 });
 
 test('backlog 只读：不写检查时间、完成时间，不碰占用', () => {

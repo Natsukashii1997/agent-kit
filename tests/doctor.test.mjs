@@ -268,6 +268,10 @@ test('会话续跑巡检：没装给 ·；按时在跑给 ✓；超时或有失�
   const unsure = check();
   assert.equal(unsure.status, 'warn', '发送结果不确定要看一眼');
   assert.match(unsure.detail.join('\n'), /不确定 1/);
+  write([row(72, 'unsure', 'u')]);
+  assert.equal(check().status, 'warn', '超过 24 小时的未决事项仍然报');
+  write([row(72, 'unsure', 'u'), row(1, 'resolved', 'u')]);
+  assert.equal(check().status, 'ok', 'resolve 之后不报');
   write([]);
   fs.writeFileSync(path.join(q, 'config.json'), '{坏了');
   const broken = check();
