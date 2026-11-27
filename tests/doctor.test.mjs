@@ -156,6 +156,16 @@ test('wrapup-guard（#150）：装好实跑通过；Stop 命令指向别处只�
   assert.equal(byName(moved, 'Claude 权限规则').status, 'warn', '不在 runtime 副本的不算装好');
   assert.ok(byName(moved, 'Claude 权限规则').detail.some(d => d.includes('wrapup-guard')));
   assert.equal(byName(moved, 'wrapup-guard 实跑'), undefined);
+  fs.writeFileSync(file, JSON.stringify(original));
+  fs.writeFileSync(path.join(dir, 'wrapup-guard.off'), '');
+  const off = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑');
+  assert.equal(off.status, 'warn', '真实状态目录里有关闭开关（第 2 轮 #151-P2-06）');
+  assert.ok(off.detail.some(d => d.includes('wrapup-guard.off')));
+  fs.rmSync(path.join(dir, 'wrapup-guard.off'));
+  const echo = structuredClone(original);
+  echo.hooks.Stop[0].hooks[0].command = `echo '"block"' # ${path.join(dir, 'runtime', 'hooks', 'wrapup-guard.mjs')}`;
+  fs.writeFileSync(file, JSON.stringify(echo));
+  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail', '只输出了 "block" 字样，不是 decision 为 block 的 JSON');
   original.hooks.Stop[0].hooks[0].command = original.hooks.Stop[0].hooks[0].command.replace(/^"[^"]+"/, '"/no/such/node"');
   fs.writeFileSync(file, JSON.stringify(original));
   assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail');

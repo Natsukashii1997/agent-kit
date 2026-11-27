@@ -2,10 +2,10 @@
 // 收尾按钮框兜底（#150）：Claude 桌面应用里，收尾要常浩在本会话拍板或回话，却没有带按钮的 wrap_up，就让模型补一次。
 //   Stop：取本轮最后一条助手消息（Stop 输入的 last_assistant_message 优先，没有才用会话记录里本轮最后一段文字），
 //     只看其中最后一个「**当前状态**：〔…〕」：〔等你决定〕，或〔等你操作〕〔受阻〕且「下一步」里写了「回复『X』」，
-//     而本轮没有合格的 mcp__ccd_turn__wrap_up（ask 非空、actions 1–2 个、每个都有按钮文字或应用动作），
+//     而本轮没有合格且调用成功的 mcp__ccd_turn__wrap_up（ask 非空、actions 1–2 个、每个都有按钮文字或应用动作，工具结果不是错误），
 //     就返回 decision=block，让模型补调 wrap_up、再把收尾三项原样重发（收尾三项仍是最后一条消息，驿窗照常读）。
 //   一轮：从最后一条不是工具结果的 user 记录开始（文字、图片、附件都算），会话记录整份读，不截断。
-//   放行：stop_hook_active（补过一次，不来回）；会话没有 wrap_up 工具（记录里看不到它的定义或调用，
+//   放行：stop_hook_active（补过一次，不来回）；会话没有 wrap_up 工具（记录里看不到它的定义或对它本身的调用，
 //        例如 claude -p、Hermes 派单的 SDK 会话，即使继承了 claude-desktop 入口变量）；「下一步」指向别的会话
 //        （local_ 会话链接：按钮会把话发回本会话，第 12 节写明这种不放按钮）；本轮成功出了【交接】卡（第 5 节）。
 // 来由：近 14 天〔等你决定〕只有 53%、〔等你操作〕只有 20% 带按钮框，一条命令都没跑的轮带 wrap_up 的只有 17% 和 6%。
@@ -24,8 +24,9 @@ const STATES = ['已结束', '等你决定', '等你操作', '后台进行中', 
 
 const STATUS = /\*\*当前状态\*\*[：:]\s*〔([^〕]+)〕/g;
 const NEXT = /\*\*下一步\*\*[：:]([\s\S]*)/;
-// 「回复『X』」「回一句「X」」「回我「X」」；前面是「不要 / 不用 / 别 / 无需 / 不必」的不算
-const REPLY = /(?<!不要|不用|别|无需|不必)回(?:复|一句|我)?\s*[「『“"][^」』”"\n]+[」』”"]/;
+// 「回复『X』」「回一句「X」」「回我「X」」；同一句里「回」字前面有否定说法的不算（「不要再回复」「无需你回复」）
+const REPLY = /回(?:复|一句|我)?\s*[「『“"][^」』”"\n]+[」』”"]/g;
+const NEGATED = /(?:不要|不用|不必|无需|不需要|没必要|别(?![的人处家])|勿)[^，。；、！？,.;!?\n「『“"]{0,4}$/;
 const OTHER_SESSION = /local_[0-9a-f]{8}/;
 
 // 一轮的开头：不是工具结果的 user 记录（文字、图片、附件都算）
@@ -36,9 +37,14 @@ function isTurnStart(d) {
   return Array.isArray(c) && c.length > 0 && c.some(x => x?.type !== 'tool_result');
 }
 
-// 这个会话能不能用 wrap_up：记录里有它的定义（prompt_snapshot），或调用过桌面应用的 ccd_turn 工具
+// 这个会话能不能用 wrap_up：记录里有它的定义（prompt_snapshot），或调用过 wrap_up 本身（只认这一个工具名）
 export function hasWrapTool(lines) {
-  return lines.some(l => (l.includes('"prompt_snapshot"') && l.includes(WRAP)) || l.includes('"name":"mcp__ccd_turn__'));
+  return lines.some(l => (l.includes('"prompt_snapshot"') && l.includes(WRAP)) || l.includes(`"name":"${WRAP}"`));
+}
+
+// 「下一步」里有没有要常浩在这里回的话（否定说法的不算）
+export function asksReply(next) {
+  return [...String(next || '').matchAll(REPLY)].some(m => !NEGATED.test(next.slice(Math.max(0, m.index - 12), m.index)));
 }
 
 // 从会话记录里取本轮：{ texts[], tools[{id,name,input}], results{id:{isError}} }；找不到开头返回 null
@@ -96,14 +102,15 @@ export function judge(turn, { lastMessage, capable = true } = {}) {
   const c = closing(text);
   if (!c) return { status: null, verdict: 'pass:no-status' };
   const { status, next } = c;
-  const needs = status === '等你决定' || ((status === '等你操作' || status === '受阻') && REPLY.test(next));
+  const needs = status === '等你决定' || ((status === '等你操作' || status === '受阻') && asksReply(next));
   if (!needs) return { status, verdict: 'pass:not-needed' };
   if (!capable) return { status, verdict: 'pass:no-wrap-tool' };
   if (OTHER_SESSION.test(next)) return { status, verdict: 'pass:other-session' };
   if (!turn) return { status, verdict: 'pass:indeterminate' };
-  if (turn.tools.some(t => t.name === WRAP && String(t.input?.ask || '').trim() && goodActions(t.input?.actions))) return { status, verdict: 'pass:has-buttons' };
-  const card = t => t.name === START && String(t.input?.title || '').trim().startsWith('【交接】') && turn.results[t.id] && !turn.results[t.id].isError;
-  if (turn.tools.some(card)) return { status, verdict: 'pass:handoff-card' };
+  // 工具调用要有结果且不是错误，才算按钮框或交接卡真的出来了
+  const ok = t => turn.results[t.id] && !turn.results[t.id].isError;
+  if (turn.tools.some(t => t.name === WRAP && String(t.input?.ask || '').trim() && goodActions(t.input?.actions) && ok(t))) return { status, verdict: 'pass:has-buttons' };
+  if (turn.tools.some(t => t.name === START && String(t.input?.title || '').trim().startsWith('【交接】') && ok(t))) return { status, verdict: 'pass:handoff-card' };
   return { status, verdict: 'block' };
 }
 

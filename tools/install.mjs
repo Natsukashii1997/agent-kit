@@ -212,7 +212,7 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   const wtFile = path.join(wt, 't.jsonl');
   fs.writeFileSync(wtFile, [
     { type: 'user', entrypoint: 'claude-desktop', message: { content: '自检' } },
-    { type: 'assistant', message: { id: 'm0', content: [{ type: 'tool_use', id: 'u0', name: 'mcp__ccd_turn__update_plan', input: {} }] } },
+    { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: ['mcp__ccd_turn__wrap_up'] } },
     { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕自检\n**下一步**：回复「合并」' }] } },
   ].map(x => JSON.stringify(x)).join('\n'));
   const w = spawnSync(node, [path.join(base, 'hooks', 'wrapup-guard.mjs')], {

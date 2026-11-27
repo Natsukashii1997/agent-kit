@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { closing, hasWrapTool, judge, lastTurn, LOG_FILE, OFF_FILE, run } from '../hooks/wrapup-guard.mjs';
+import { asksReply, closing, hasWrapTool, judge, lastTurn, LOG_FILE, OFF_FILE, run } from '../hooks/wrapup-guard.mjs';
 
 const HOOK = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'wrapup-guard.mjs');
 const WRAP = 'mcp__ccd_turn__wrap_up';
@@ -41,12 +41,22 @@ test('wrap_up 要有 ask 和 1–2 个按钮才算（#151-P1-01）', () => {
   assert.equal(v({ recap: 'r', ask: '合并吗？', actions: JSON.stringify([{ label: '合并' }]) }), 'pass:has-buttons', 'actions 以字符串传入');
 });
 
+test('wrap_up 要调用成功才算：报错或没有工具结果都要补（第 2 轮 #151-P1-01）', () => {
+  assert.equal(verdict([user('x'), buttons(), result('u-wrap'), said(close('等你决定'))]), 'pass:has-buttons');
+  assert.equal(verdict([user('x'), buttons(), result('u-wrap', true), said(close('等你决定'))]), 'block', '工具报错');
+  assert.equal(verdict([user('x'), buttons(), said(close('等你决定'))]), 'block', '没有工具结果');
+});
+
 test('〔等你操作〕〔受阻〕：写了回话才要按钮；否定说法、长回话（#151-P2-02）', () => {
   assert.equal(verdict([user('x'), said(close('等你操作', '在 chrome://extensions 点刷新，然后回我「已刷新」'))]), 'block');
   assert.equal(verdict([user('x'), said(close('受阻', '回复「先不做」'))]), 'block');
   assert.equal(verdict([user('x'), said(close('等你操作', '跑完把最后十几行拍照发我'))]), 'pass:not-needed');
   assert.equal(verdict([user('x'), said(close('受阻', '等 GitHub 恢复后我再推'))]), 'pass:not-needed');
   assert.equal(verdict([user('x'), said(close('等你操作', '在终端跑完就行，不用回复「好了」'))]), 'pass:not-needed', '否定说法不算');
+  for (const n of ['不要回复「X」', '不用回一句「X」', '不要再回复「X」', '不必再回我「X」', '无需你回复「X」', '不需要再回复「X」', '跑完别回复「好了」'])
+    assert.equal(asksReply(n), false, n);
+  for (const n of ['回复「合并」', '我推荐回复「先做班主任版」', '都不做就回复「先不做」', '到别的地方看完后回复「看过了」', '不用等我，你回复「开始」就行'])
+    assert.equal(asksReply(n), true, n);
   const long = '同意按第二种做法改，P1 两条都按修法返修，改完不再送审，直接交 Hermes 合并并装机，装完把截图发我看一眼';
   assert.ok(long.length > 40);
   assert.equal(verdict([user('x'), said(close('等你操作', `回复「${long}」`))]), 'block', '回话超过 40 字也认');
@@ -114,7 +124,8 @@ test('交接卡：成功创建才放行（#151-P2-04）', () => {
 test('会话里没有 wrap_up：放行，即使继承了 claude-desktop 入口（#151-P2-05）', () => {
   const records = [user('x', { entrypoint: 'claude-desktop' }), said(close('等你决定'))];
   assert.equal(verdict(records, { snapshot: false }), 'pass:no-wrap-tool');
-  assert.equal(verdict([used('mcp__ccd_turn__update_plan', {}, 'u-plan'), ...records], { snapshot: false }), 'block', '调用过 ccd_turn 工具就算有');
+  assert.equal(verdict([used('mcp__ccd_turn__update_plan', {}, 'u-plan'), ...records], { snapshot: false }), 'pass:no-wrap-tool', '只调用过同族别的工具不算（第 2 轮 #151-P2-05）');
+  assert.equal(verdict([used(WRAP, { recap: 'r' }, 'u-old'), result('u-old'), ...records], { snapshot: false }), 'block', '调用过 wrap_up 本身就算有');
   assert.equal(hasWrapTool(lines([user(`常浩贴的一段话里提到 ${WRAP}`)])), false, '只是正文里提到工具名不算');
 });
 

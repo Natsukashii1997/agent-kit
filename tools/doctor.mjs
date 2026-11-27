@@ -190,13 +190,20 @@ function checkHooks({ home, run, env, dir }) {
       const t = path.join(tmp, 't.jsonl');
       fs.writeFileSync(t, [
         { type: 'user', message: { content: 'doctor' } },
-        { type: 'assistant', message: { id: 'd1', content: [{ type: 'tool_use', id: 'u1', name: 'mcp__ccd_turn__update_plan', input: {} }] } },
+        { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: ['mcp__ccd_turn__wrap_up'] } },
         { type: 'assistant', message: { id: 'd2', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕doctor\n**下一步**：回复「合并」' }] } },
       ].map(x => JSON.stringify(x)).join('\n'));
       const w = run('/bin/sh', ['-c', wrapupCmd], { input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'doctor', transcript_path: t }), env: { AGENT_KIT_NO_LOG: '1', AGENT_KIT_STATE_DIR: tmp } });
-      results.push(w.code === 0 && w.stdout.includes('"block"')
-        ? { name: 'wrapup-guard 实跑', status: 'ok', detail: ['按设置里 Stop 的命令实跑：缺按钮框的〔等你决定〕被要求补'] }
-        : { name: 'wrapup-guard 实跑', status: 'fail', detail: [`缺按钮框的〔等你决定〕没被要求补：${w.stderr || w.stdout || `退出码 ${w.code}`}`] });
+      let decision = null;
+      try {
+        decision = JSON.parse(w.stdout).decision;
+      } catch {}
+      const off = fs.existsSync(path.join(dir, 'wrapup-guard.off'));
+      results.push(w.code === 0 && decision === 'block'
+        ? off
+          ? { name: 'wrapup-guard 实跑', status: 'warn', detail: ['按设置里 Stop 的命令实跑能要求补，但状态目录里有 wrapup-guard.off，实际已关闭；要打开就删掉这个文件'] }
+          : { name: 'wrapup-guard 实跑', status: 'ok', detail: ['按设置里 Stop 的命令实跑：缺按钮框的〔等你决定〕被要求补；状态目录里没有关闭开关'] }
+        : { name: 'wrapup-guard 实跑', status: 'fail', detail: [`缺按钮框的〔等你决定〕没被要求补（输出要是 decision 为 block 的 JSON）：${w.stderr || w.stdout || `退出码 ${w.code}`}`] });
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
