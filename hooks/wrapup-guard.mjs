@@ -24,10 +24,12 @@ const STATES = ['已结束', '等你决定', '等你操作', '后台进行中', 
 
 const STATUS = /\*\*当前状态\*\*[：:]\s*〔([^〕]+)〕/g;
 const NEXT = /\*\*下一步\*\*[：:]([\s\S]*)/;
-// 「回复『X』」「回一句「X」」「回我「X」」；按标点切成小句，「回」所在小句里它前面有否定说法的不算
-// （「不要再回复」「不要在这个会话回复」「不想回复」），双重否定（「不是不要回复」）仍算要回话
+// 「回复『X』」「回一句「X」」「回我「X」」。否定要直接管着这个「回」：否定词和「回」之间只许隔「你」「再」
+// 和一个「在……」地点状语（「不要再回复」「无需你回复」「不要在这个会话回复」「不希望你在这里回复」）；
+// 「别忘了回复」「不要忘了回复」中间隔着别的动词，「分别回复」「区别」里的「别」不是否定，都算要回话。
+// 双重否定（「不是不要回复」）也算要回话。只看「回」所在小句（按标点切）
 const REPLY = /回(?:复|一句|我)?\s*[「『“"][^」』”"\n]+[」』”"]/g;
-const NEGATION = /不要|不用|不必|无需|无须|不需要|没必要|不想|不希望|别(?![的人处家])|勿/;
+const NEGATED = /(?:不要|不用|不必|无需|无须|不需要|没必要|不想|不希望|勿|(?<![分区特个告离类差识辨级性派])别)你?再?(?:在[^，。；！？,.;!?\n]{1,8})?$/;
 const DOUBLE_NEGATION = /不是不|并非不|不能不|不得不|没有不/;
 const CLAUSE_END = /[，。；！？,.;!?\n]/;
 const OTHER_SESSION = /local_[0-9a-f]{8}/;
@@ -66,7 +68,7 @@ export function asksReply(next) {
   const text = String(next || '');
   return [...text.matchAll(REPLY)].some(m => {
     const before = clauseBefore(text, m.index);
-    return DOUBLE_NEGATION.test(before) || !NEGATION.test(before);
+    return DOUBLE_NEGATION.test(before) || !NEGATED.test(before);
   });
 }
 
