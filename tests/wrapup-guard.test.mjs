@@ -163,6 +163,25 @@ test('同一次回复里并行两个工具调用：各写一行、共用 message
   assert.deepEqual(turn.texts, ['先说一句', close('等你决定')]);
 });
 
+test('去重的边界：同一行重写、单行多块、没有 uuid、工具缺 id（#158-R2）', () => {
+  const rec = (x, extra = {}) => ({ type: 'assistant', message: { id: 'm-same', content: Array.isArray(x) ? x : [x] }, ...extra });
+  const turnOf = records => lastTurn(lines([snapshot, user('x'), ...records]));
+  const text = t => ({ type: 'text', text: t });
+  // 同一行（同一 uuid）写了两遍：文字只算一次
+  const once = rec(text('收尾'), { uuid: 'a1' });
+  assert.deepEqual(turnOf([once, once]).texts, ['收尾']);
+  // 单行多块：按序号区分，两块都留
+  assert.deepEqual(turnOf([rec([text('一'), text('二')], { uuid: 'a1' })]).texts, ['一', '二']);
+  // 没有 uuid、分行写、共用 message.id、序号都是 0：不同的块都留，最后一段仍是收尾
+  const split = turnOf([rec(text('正文')), rec(text(close('等你决定')))]);
+  assert.deepEqual(split.texts, ['正文', close('等你决定')]);
+  // 没有 uuid、同一行一字不差写了两遍：只算一次
+  assert.deepEqual(turnOf([rec(text('收尾')), rec(text('收尾'))]).texts, ['收尾']);
+  // 工具调用缺 id、没有 uuid、分行写：两个都留
+  const noId = name => rec({ type: 'tool_use', name, input: {} });
+  assert.deepEqual(turnOf([noId('Bash'), noId(WRAP)]).tools.map(t => t.name), ['Bash', WRAP]);
+});
+
 function setup(records) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-wrapup-test-'));
   const transcript = path.join(dir, 't.jsonl');

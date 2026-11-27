@@ -99,9 +99,10 @@ export function lastTurn(lines) {
     }
     if (d.type !== 'assistant') continue;
     // 同一次回复的每个内容块各写一行、共用 message.id、序号都是 0，不能拿它去重：
-    // 工具调用按自己的 id；其他块按这一行的 uuid（没有时退回 message.id）加序号
+    // 工具调用按自己的 id；其他块（和缺 id 的工具调用）按这一行的 uuid 加序号加块内容。
+    // 没有 uuid 时退回 message.id，带上块内容后，分行写的不同块不会撞键，一字不差的重写仍只算一次
     content.forEach((x, i) => {
-      const key = x?.type === 'tool_use' && x.id ? `tool|${x.id}` : `${d.uuid || d.message?.id}|${i}|${x?.type}`;
+      const key = x?.type === 'tool_use' && x.id ? `tool|${x.id}` : `${d.uuid || d.message?.id}|${i}|${JSON.stringify(x)}`;
       if (seen.has(key)) return;
       seen.add(key);
       if (x?.type === 'tool_use') turn.tools.push({ id: x.id, name: x.name, input: x.input || {} });
