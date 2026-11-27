@@ -163,9 +163,11 @@ test('wrapup-guard（#150）：装好实跑通过；Stop 命令指向别处只�
   assert.ok(off.detail.some(d => d.includes('wrapup-guard.off')));
   fs.rmSync(path.join(dir, 'wrapup-guard.off'));
   const echo = structuredClone(original);
-  echo.hooks.Stop[0].hooks[0].command = `echo '"block"' # ${path.join(dir, 'runtime', 'hooks', 'wrapup-guard.mjs')}`;
+  echo.hooks.Stop[0].hooks[0].command = `echo '{"decision":"block"}' # ${path.join(dir, 'runtime', 'hooks', 'wrapup-guard.mjs')}`;
   fs.writeFileSync(file, JSON.stringify(echo));
-  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail', '只输出了 "block" 字样，不是 decision 为 block 的 JSON');
+  const forged = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  assert.equal(byName(forged, 'wrapup-guard 实跑'), undefined, '脚本路径只在注释里、没被执行：不认作已装，不实跑（第 3 轮 #151-P2-06）');
+  assert.equal(byName(forged, 'Claude 权限规则').status, 'warn');
   original.hooks.Stop[0].hooks[0].command = original.hooks.Stop[0].hooks[0].command.replace(/^"[^"]+"/, '"/no/such/node"');
   fs.writeFileSync(file, JSON.stringify(original));
   assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail');

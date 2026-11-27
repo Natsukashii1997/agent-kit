@@ -122,7 +122,9 @@ function checkHooks({ home, run, env, dir }) {
   const handoffConfig = fs.existsSync(path.join(dir, 'context-handoff', 'config.json'));
   // 收尾按钮框兜底（#150）
   const stopCmds = (settings.hooks?.Stop || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
-  const wrapupCmd = stopCmds.find(c => c.includes(path.join(runtimeHooks, 'wrapup-guard.mjs')));
+  // 只认安装写进去的那种形状：「"<node>" "<runtime>/hooks/wrapup-guard.mjs"」，脚本路径要是解释器的参数，不能只出现在注释里
+  const wrapupScript = path.join(runtimeHooks, 'wrapup-guard.mjs');
+  const wrapupCmd = stopCmds.find(c => /^"[^"]+" "([^"]+)"$/.exec(c)?.[1] === wrapupScript);
   const hasWrapup = Boolean(wrapupCmd);
   if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig && hasHandoff && handoffConfig && hasWrapup) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、8 个 hook 都在，首轮整理和上下文提醒的配置在状态目录`] });
   else
@@ -136,7 +138,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
         ...(!hasPrecheck ? ['没装 bash-precheck（Bash 预检，防会话卡在没人点的安全检查批准上）'] : []),
-        ...(!hasWrapup ? ['没装 wrapup-guard（收尾按钮框兜底，Stop 钩子），或没指向 runtime 副本'] : []),
+        ...(!hasWrapup ? ['没装 wrapup-guard（收尾按钮框兜底，Stop 钩子），或命令不是「"<node>" "<runtime 副本>/hooks/wrapup-guard.mjs"」'] : []),
         ...(!hasOrganize ? ['首轮整理钩子没装，或还指向 ~/.claude/hooks 下的旧位置（启动和发消息两处都要指向 runtime 副本）'] : []),
         ...(!organizeConfig ? ['状态目录里没有首轮整理配置 session-organize-once/config.json'] : []),
         ...(!hasHandoff ? ['上下文提醒钩子没装，或还指向 ~/.claude/hooks 下的旧位置（发消息和工具调用后两处都要指向 runtime 副本）'] : []),
@@ -190,7 +192,7 @@ function checkHooks({ home, run, env, dir }) {
       const t = path.join(tmp, 't.jsonl');
       fs.writeFileSync(t, [
         { type: 'user', message: { content: 'doctor' } },
-        { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: ['mcp__ccd_turn__wrap_up'] } },
+        { type: 'attachment', attachment: { type: 'prompt_snapshot', tools: [{ name: 'mcp__ccd_turn__wrap_up' }] } },
         { type: 'assistant', message: { id: 'd2', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕doctor\n**下一步**：回复「合并」' }] } },
       ].map(x => JSON.stringify(x)).join('\n'));
       const w = run('/bin/sh', ['-c', wrapupCmd], { input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'doctor', transcript_path: t }), env: { AGENT_KIT_NO_LOG: '1', AGENT_KIT_STATE_DIR: tmp } });

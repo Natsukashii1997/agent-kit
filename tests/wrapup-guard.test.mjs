@@ -12,7 +12,7 @@ const WRAP = 'mcp__ccd_turn__wrap_up';
 const START = 'mcp__ccd_session__start_session';
 
 // 桌面应用会话开头的提示词快照里带着 wrap_up 的定义
-const snapshot = { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: [`… ${WRAP} …`] } };
+const snapshot = { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: ['…'], tools: [{ name: 'mcp__ccd_turn__update_plan' }, { name: WRAP }] } };
 const user = (content, extra = {}) => ({ type: 'user', entrypoint: 'claude-desktop', message: { content }, ...extra });
 const said = (text, id = 'm-text') => ({ type: 'assistant', message: { id, content: [{ type: 'text', text }] } });
 const used = (name, input = {}, id = `u-${name}`) => ({ type: 'assistant', message: { id: `m-${id}`, content: [{ type: 'tool_use', id, name, input }] } });
@@ -53,9 +53,11 @@ test('〔等你操作〕〔受阻〕：写了回话才要按钮；否定说法�
   assert.equal(verdict([user('x'), said(close('等你操作', '跑完把最后十几行拍照发我'))]), 'pass:not-needed');
   assert.equal(verdict([user('x'), said(close('受阻', '等 GitHub 恢复后我再推'))]), 'pass:not-needed');
   assert.equal(verdict([user('x'), said(close('等你操作', '在终端跑完就行，不用回复「好了」'))]), 'pass:not-needed', '否定说法不算');
-  for (const n of ['不要回复「X」', '不用回一句「X」', '不要再回复「X」', '不必再回我「X」', '无需你回复「X」', '不需要再回复「X」', '跑完别回复「好了」'])
+  for (const n of ['不要回复「X」', '不用回一句「X」', '不要再回复「X」', '不必再回我「X」', '无需你回复「X」', '不需要再回复「X」', '跑完别回复「好了」',
+    '不要在这个会话回复「X」', '不想回复「X」', '不希望你在这里回复「X」', '无须回复「X」'])
     assert.equal(asksReply(n), false, n);
-  for (const n of ['回复「合并」', '我推荐回复「先做班主任版」', '都不做就回复「先不做」', '到别的地方看完后回复「看过了」', '不用等我，你回复「开始」就行'])
+  for (const n of ['回复「合并」', '我推荐回复「先做班主任版」', '都不做就回复「先不做」', '到别的地方看完后回复「看过了」', '不用等我，你回复「开始」就行',
+    '不是不要回复「X」，是要你现在回', '跑完不用截图。回复「已跑完」', '不要回复「A」；要合并就回复「合并」'])
     assert.equal(asksReply(n), true, n);
   const long = '同意按第二种做法改，P1 两条都按修法返修，改完不再送审，直接交 Hermes 合并并装机，装完把截图发我看一眼';
   assert.ok(long.length > 40);
@@ -127,6 +129,10 @@ test('会话里没有 wrap_up：放行，即使继承了 claude-desktop 入口�
   assert.equal(verdict([used('mcp__ccd_turn__update_plan', {}, 'u-plan'), ...records], { snapshot: false }), 'pass:no-wrap-tool', '只调用过同族别的工具不算（第 2 轮 #151-P2-05）');
   assert.equal(verdict([used(WRAP, { recap: 'r' }, 'u-old'), result('u-old'), ...records], { snapshot: false }), 'block', '调用过 wrap_up 本身就算有');
   assert.equal(hasWrapTool(lines([user(`常浩贴的一段话里提到 ${WRAP}`)])), false, '只是正文里提到工具名不算');
+  const mention = { type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: [`此环境不可用 ${WRAP}`], tools: [{ name: 'Bash' }] } };
+  assert.equal(hasWrapTool(lines([mention])), false, '快照正文提到工具名、工具列表里没有它：不算（第 3 轮 #151-P2-05）');
+  assert.equal(hasWrapTool(lines([{ type: 'attachment', attachment: { type: 'prompt_snapshot', systemPrompt: [WRAP] } }])), false, '快照没有工具列表：不算');
+  assert.equal(hasWrapTool(lines([snapshot])), true, '工具列表里有 wrap_up 的定义');
 });
 
 test('找不到本轮开头：记为 indeterminate，不当成正常放行（#151-P2-03）', () => {

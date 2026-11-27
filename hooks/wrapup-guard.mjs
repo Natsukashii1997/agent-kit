@@ -24,9 +24,12 @@ const STATES = ['已结束', '等你决定', '等你操作', '后台进行中', 
 
 const STATUS = /\*\*当前状态\*\*[：:]\s*〔([^〕]+)〕/g;
 const NEXT = /\*\*下一步\*\*[：:]([\s\S]*)/;
-// 「回复『X』」「回一句「X」」「回我「X」」；同一句里「回」字前面有否定说法的不算（「不要再回复」「无需你回复」）
+// 「回复『X』」「回一句「X」」「回我「X」」；按标点切成小句，「回」所在小句里它前面有否定说法的不算
+// （「不要再回复」「不要在这个会话回复」「不想回复」），双重否定（「不是不要回复」）仍算要回话
 const REPLY = /回(?:复|一句|我)?\s*[「『“"][^」』”"\n]+[」』”"]/g;
-const NEGATED = /(?:不要|不用|不必|无需|不需要|没必要|别(?![的人处家])|勿)[^，。；、！？,.;!?\n「『“"]{0,4}$/;
+const NEGATION = /不要|不用|不必|无需|无须|不需要|没必要|不想|不希望|别(?![的人处家])|勿/;
+const DOUBLE_NEGATION = /不是不|并非不|不能不|不得不|没有不/;
+const CLAUSE_END = /[，。；！？,.;!?\n]/;
 const OTHER_SESSION = /local_[0-9a-f]{8}/;
 
 // 一轮的开头：不是工具结果的 user 记录（文字、图片、附件都算）
@@ -37,14 +40,34 @@ function isTurnStart(d) {
   return Array.isArray(c) && c.length > 0 && c.some(x => x?.type !== 'tool_result');
 }
 
-// 这个会话能不能用 wrap_up：记录里有它的定义（prompt_snapshot），或调用过 wrap_up 本身（只认这一个工具名）
+// 这个会话能不能用 wrap_up：提示词快照的工具列表（attachment.tools）里有它的定义，或调用过 wrap_up 本身。
+// 快照的 systemPrompt 正文里提到工具名不算
 export function hasWrapTool(lines) {
-  return lines.some(l => (l.includes('"prompt_snapshot"') && l.includes(WRAP)) || l.includes(`"name":"${WRAP}"`));
+  return lines.some(l => {
+    if (l.includes('"prompt_snapshot"') && l.includes(WRAP)) {
+      const a = parseJson(l)?.attachment;
+      if (a?.type === 'prompt_snapshot' && Array.isArray(a.tools) && a.tools.some(t => t?.name === WRAP)) return true;
+    }
+    if (!l.includes(`"name":"${WRAP}"`)) return false;
+    const d = parseJson(l);
+    return d?.type === 'assistant' && (d.message?.content || []).some(x => x?.type === 'tool_use' && x.name === WRAP);
+  });
 }
 
-// 「下一步」里有没有要常浩在这里回的话（否定说法的不算）
+// 「回」所在小句里、它前面那一段
+function clauseBefore(text, index) {
+  let i = index;
+  while (i > 0 && !CLAUSE_END.test(text[i - 1])) i--;
+  return text.slice(i, index);
+}
+
+// 「下一步」里有没有要常浩在这里回的话（否定说法的不算，双重否定算）
 export function asksReply(next) {
-  return [...String(next || '').matchAll(REPLY)].some(m => !NEGATED.test(next.slice(Math.max(0, m.index - 12), m.index)));
+  const text = String(next || '');
+  return [...text.matchAll(REPLY)].some(m => {
+    const before = clauseBefore(text, m.index);
+    return DOUBLE_NEGATION.test(before) || !NEGATION.test(before);
+  });
 }
 
 // 从会话记录里取本轮：{ texts[], tools[{id,name,input}], results{id:{isError}} }；找不到开头返回 null
