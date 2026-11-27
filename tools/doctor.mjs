@@ -457,6 +457,54 @@ function checkRepoHooks({ config, env, home, run }) {
   };
 }
 
+// 合并了没拉（复盘评审「合并了 ≠ 生效了」，#163）：项目目录下各仓库的主目录落后远端 main 几个提交。
+// 从主目录运行的仓库（skill 链接、常驻任务）落后就是合并了没生效。不联网，按上次 fetch 的远端引用算；只读，不替你拉。
+function checkMainBehind({ config, env, home, run }) {
+  const name = '合并了没拉';
+  const root = config.workRoot || env.AGENT_KIT_WORK_ROOT || path.join(home, 'Documents', 'ChatGPT', '个人', 'work');
+  const branch = config.mainBranch || 'main';
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_'));
+  } catch {
+    return { name, status: 'info', detail: [`没找到项目目录 ${root}，不查`] };
+  }
+  const isMainCheckout = r => {
+    try {
+      return fs.statSync(path.join(r, '.git')).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const repos = entries.map(e => path.join(root, e.name)).filter(isMainCheckout);
+  const behind = [];
+  const unknown = [];
+  for (const r of repos) {
+    const out = run('git', ['-C', r, 'rev-list', '--count', `${branch}..origin/${branch}`]);
+    const n = Number(out.stdout.trim());
+    if (out.code === 0 && out.stdout.trim() !== '' && Number.isInteger(n)) {
+      if (n > 0) behind.push({ r, n });
+      continue;
+    }
+    // 不猜原因：有报错就带上第一行，没有就只说没拿到结果
+    const why = (out.stderr || '').trim().split('\n')[0].slice(0, 80);
+    unknown.push(`${path.basename(r)}（${why || '没拿到结果'}）`);
+  }
+  const tail = unknown.length ? [`查不了的仓库：${unknown.join('；')}`] : [];
+  // 只有纳入检查的仓库全都查到了、而且都不落后，才给 ✓；有一个查不了就只给提示
+  if (!behind.length) return { name, status: unknown.length ? 'info' : 'ok', detail: [`${repos.length - unknown.length} 个仓库的主目录都不落后远端 ${branch}（按上次 fetch 算）`, ...tail] };
+  behind.sort((a, b) => b.n - a.n);
+  return {
+    name,
+    status: 'info',
+    detail: [
+      `${behind.length} 个仓库的主目录落后远端 ${branch}（按上次 fetch 算）。从主目录运行的仓库落后，就是合并了没生效；拉不拉按《工程流程》第 5 节：`,
+      ...behind.map(({ r, n }) => `  ${path.basename(r)}：落后 ${n} 个提交`),
+      ...tail,
+    ],
+  };
+}
+
 export function runDoctor(deps = {}) {
   const env = deps.env || process.env;
   const home = deps.home || os.homedir();
@@ -478,6 +526,7 @@ export function runDoctor(deps = {}) {
     checkThinkingReview(ctx),
     ...checkRepos(ctx),
     checkRepoHooks(ctx),
+    checkMainBehind(ctx),
   ];
 }
 
