@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { acquireLock, beat, check, classifyError, collect, done, family, openUnsure, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
+import { check, claim, classifyError, collect, done, family, latestRuns, openUnsure, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
 
 const NOW = new Date(2026, 10, 27, 12, 0, 0).getTime(); // 本机时区 11-27 12:00
 const START = NOW - 48 * 36e5;
@@ -238,42 +238,29 @@ test('动手前复核分四种：still、taken、moved、unknown；只有确定�
   assert.equal(c().state, 'taken');
 });
 
-test('占用：别人占着这一轮跳过；只有持有者能放开；过期的清掉再占；空轮当场放开', () => {
+test('运行记录：每轮各写各的；空轮当场记跑完；done 只写自己那一轮', () => {
   const { p } = fake();
   configured(p);
   errSession(p, 'l', 'API Error: Connection lost mid-response.', NOW - 600e3, { model: 'claude-opus-5-5' });
-  const first = scan({ p, now: NOW, lease: true });
-  assert.equal(first.actions.length, 1);
-  assert.ok(first.runId);
-  const second = scan({ p, now: NOW + 60e3, lease: true });
-  assert.equal(second.actions.length, 0);
-  assert.equal(second.skipped.leased, 1);
-  assert.equal(second.busySince, new Date(NOW).toISOString());
-  const before = fs.readFileSync(p.state, 'utf8');
-  assert.equal(done({ p, now: NOW + 2 * 60e3, runId: 'someone-else' }).released, false, '不是持有者放不开');
-  assert.equal(fs.readFileSync(p.state, 'utf8'), before, '不是持有者也不能记完成时间');
-  assert.equal(scan({ p, now: NOW + 3 * 60e3, lease: true }).skipped.leased, 1);
-  const third = scan({ p, now: NOW + 31 * 60e3, lease: true });
-  assert.equal(third.actions.length, 1, '占用超过 30 分钟算上一轮死掉');
-  const mid = fs.readFileSync(p.state, 'utf8');
-  assert.equal(done({ p, now: NOW + 32 * 60e3, runId: first.runId }).released, false, '旧持有者不能放开新一轮的占用');
-  assert.equal(fs.readFileSync(p.state, 'utf8'), mid, '旧持有者不能把新一轮记成跑完');
-  const st = done({ p, now: NOW + 32 * 60e3, runId: third.runId });
-  assert.equal(st.released, true);
-  assert.equal(st.lastRunCompletedAt, new Date(NOW + 32 * 60e3).toISOString());
-  assert.ok(scan({ p, now: NOW + 33 * 60e3, lease: true }).runId);
+  const a = scan({ p, now: NOW, track: true });
+  assert.ok(a.runId);
+  const b = scan({ p, now: NOW + 60e3, track: true });
+  assert.notEqual(a.runId, b.runId);
+  assert.equal(latestRuns(p).started.runId, b.runId);
+  done({ p, now: NOW + 2 * 60e3, runId: a.runId }); // 旧的一轮晚到的 done
+  assert.equal(latestRuns(p).started.doneAt, undefined, '旧一轮的 done 不会把新一轮记成跑完');
+  done({ p, now: NOW + 3 * 60e3, runId: b.runId });
+  assert.equal(latestRuns(p).started.doneAt, new Date(NOW + 3 * 60e3).toISOString());
   const { p: p2 } = fake();
-  assert.equal(scan({ p: p2, now: NOW, lease: true }).runId, null);
-  const s2 = status({ p: p2, now: NOW });
-  assert.equal(s2.state.lastRunCompletedAt, new Date(NOW).toISOString(), '空轮直接算跑完');
-  assert.equal(s2.lock, null, '空轮放开占用');
+  assert.equal(scan({ p: p2, now: NOW, track: true }).runId, null, '空轮不用 done');
+  assert.ok(latestRuns(p2).done.doneAt);
 });
 
-// 8 个子进程等到同一时刻，各自 acquireLock 一次；返回抢到的个数
-async function race(p, env, now) {
+// 8 个子进程等到同一时刻，各自 claim 同一次停下一次；返回认领到的个数
+async function race(p, env, sessionId, anchor) {
   const mod = path.join(import.meta.dirname, '..', 'tools', 'session-sweep.mjs');
   const go = Date.now() + 1500;
-  const code = `import { acquireLock, paths } from ${JSON.stringify(mod)}; const p = paths(process.env, ${JSON.stringify(path.dirname(p.dir))}); while (Date.now() < ${go}); console.log(acquireLock(p${now ? `, ${now}` : ''}) ? 'got' : 'busy');`;
+  const code = `import { claim, paths } from ${JSON.stringify(mod)}; const p = paths(process.env, ${JSON.stringify(path.dirname(p.dir))}); while (Date.now() < ${go}); console.log(claim({ p, sessionId: ${JSON.stringify(sessionId)}, anchor: ${anchor} }).claimed ? 'got' : 'busy');`;
   const one = () => new Promise(resolve => {
     const c = spawn(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, ...env } });
     let out = '';
@@ -281,57 +268,42 @@ async function race(p, env, now) {
     c.on('close', () => resolve(out.trim()));
   });
   const got = await Promise.all(Array.from({ length: 8 }, one));
-  assert.equal(got.filter(x => x === 'busy').length + got.filter(x => x === 'got').length, 8, got.join(','));
+  assert.equal(got.filter(x => x === 'got' || x === 'busy').length, 8, got.join(','));
   return got.filter(x => x === 'got').length;
 }
-const age = (file, ms) => {
-  const t = (Date.now() - ms) / 1000;
-  fs.utimesSync(file, t, t);
-};
 
-test('占用是原子的：8 个进程同一时刻抢空锁，只有 1 个抢到', async () => {
+test('认领是原子的：8 个进程同一时刻认领同一次停下，只有 1 个认领到；上一次认领过期后再抢，也只有 1 个', async () => {
   const { p, env } = fake();
-  assert.equal(await race(p, env), 1);
+  assert.equal(await race(p, env, 'local_x', 111), 1);
+  const f = path.join(p.claims, 'local_x@111#1');
+  const t = (Date.now() - 40 * 60e3) / 1000;
+  fs.utimesSync(f, t, t);
+  assert.equal(await race(p, env, 'local_x', 111), 1, '过期后接着抢下一个序号');
+  assert.deepEqual(fs.readdirSync(p.claims).sort(), ['local_x@111#1', 'local_x@111#2'], '认领文件只增不删');
 });
 
-test('过期锁接管：8 个进程同时接管同一把过期锁，只有 1 个抢到；空锁文件过期也能回收', async () => {
-  const { p, env } = fake();
-  fs.mkdirSync(p.dir, { recursive: true });
-  fs.writeFileSync(p.lock, JSON.stringify({ runId: 'dead', at: new Date(Date.now() - 40 * 60e3).toISOString() }));
-  age(p.lock, 40 * 60e3);
-  assert.equal(await race(p, env), 1);
-  assert.notEqual(JSON.parse(fs.readFileSync(p.lock, 'utf8')).runId, 'dead');
-  const { p: p2, env: env2 } = fake();
-  fs.mkdirSync(p2.dir, { recursive: true });
-  fs.writeFileSync(p2.lock, ''); // 创建锁后、写内容前崩掉
-  age(p2.lock, 40 * 60e3);
-  assert.equal(await race(p2, env2), 1);
-});
-
-test('心跳续租：持有者续租后不会被当成过期；接管者死在短锁里的，短锁过期后能回收', () => {
+test('认领：处理途中别的轮认领不到；处理完（有了终态留痕）或 30 分钟没进展，才能再认领', () => {
   const { p } = fake();
-  const now = Date.now();
-  const id = acquireLock(p, now - 40 * 60e3);
-  assert.ok(id);
-  assert.equal(beat(p, id, now), true);
-  assert.equal(acquireLock(p, now), null, '续过租，没过期');
-  assert.equal(beat(p, 'other', now), false);
-  age(p.lock, 40 * 60e3);
-  fs.writeFileSync(p.takeover, '');
-  age(p.takeover, 2 * 60e3);
-  assert.ok(acquireLock(p, now), '过期锁 + 过期短锁都能回收');
-  assert.equal(fs.existsSync(p.takeover), false);
+  const k = { p, sessionId: 'local_c', anchor: 5 };
+  const rec = (t, action) => record({ p, now: t, args: { session: 'local_c', anchor: '5', kind: 'model_limit', action } });
+  assert.equal(claim({ ...k, now: NOW }).gen, 1);
+  assert.equal(claim({ ...k, now: NOW + 1000 }).claimed, false);
+  rec(NOW + 2000, 'switching');
+  rec(NOW + 3000, 'model_set');
+  assert.equal(claim({ ...k, now: NOW + 10 * 60e3 }).claimed, false, 'switching、model_set 是途中，不算处理完');
+  assert.equal(claim({ ...k, now: NOW + 34 * 60e3 }).gen, 2, '最后一次进展后 30 分钟没动静，算那一轮死掉');
+  rec(NOW + 35 * 60e3, 'failed');
+  assert.equal(claim({ ...k, now: NOW + 36 * 60e3 }).gen, 3, '失败是终态，下一轮可以重试');
 });
 
-test('backlog 只读：不写检查时间、完成时间，不碰占用', () => {
+test('backlog 只读：不写检查时间、完成时间、运行记录', () => {
   const { p } = fake();
   configured(p);
   errSession(p, 'old', FABLE, START - 36e5);
-  const runId = acquireLock(p, NOW);
   const before = fs.existsSync(p.state) ? fs.readFileSync(p.state, 'utf8') : null;
   assert.equal(collect({ p, now: NOW }).backlog.length, 1);
   assert.equal(fs.existsSync(p.state) ? fs.readFileSync(p.state, 'utf8') : null, before);
-  assert.equal(status({ p, now: NOW }).lock.runId, runId);
+  assert.equal(fs.existsSync(p.runs), false);
 });
 
 test('留痕、设置、状态', () => {

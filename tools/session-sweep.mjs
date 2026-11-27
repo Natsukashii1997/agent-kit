@@ -2,10 +2,10 @@
 // 会话续跑巡检：找出「停下了、没人接」的 Claude 桌面会话，交给桌面版定时任务按原因接上。
 // 本脚本只读桌面版的会话索引和会话记录、只写自己状态目录里的文件，不改任何会话；
 // 换模型、发消息由定时任务用桌面版的会话管理工具做（launchd 调不到那些工具）。
-//   node tools/session-sweep.mjs scan [--lease]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--lease 先原子地占住本轮（输出 runId；别人占着就不处理）
+//   node tools/session-sweep.mjs scan [--track]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--track 给这一轮开一份运行记录（输出 runId）
 //   node tools/session-sweep.mjs check --session <id> --anchor <毫秒> [--model <模型>]   动手前复核：still（仍停在原处）/ taken（有人接手）/ moved（停在了别处）/ unknown（拿不准）
-//   node tools/session-sweep.mjs beat --run <runId>   心跳：续租自己持有的占用（处理每一项前调一次）
-//   node tools/session-sweep.mjs done --run <runId>   本轮处理完：只有占用的持有者才能记完成时间、放开占用
+//   node tools/session-sweep.mjs claim --session <id> --anchor <毫秒>   动手前认领这一次停下（原子；别的一轮正在处理就认领不到）
+//   node tools/session-sweep.mjs done --run <runId>   这一轮处理完，记进它自己的运行记录
 //   node tools/session-sweep.mjs resolve --session <id> --anchor <毫秒>   常浩确认「发送结果不确定」的那一项已经处理过
 //   node tools/session-sweep.mjs record --session <id> --anchor <毫秒> --kind <类别> --action <动作> [--from <模型>] [--to <模型>] [--note <说明>]
 //   node tools/session-sweep.mjs backlog [--json]   巡检启用前就停着的、或超出时间窗的会话清单（只列不动，给常浩过目）
@@ -29,8 +29,8 @@ export const DEFAULT_CONFIG = {
 const WAKE = new Set(['switch', 'continue', 'nudge']);
 const ACCOUNT_LIMITS = /^(5-hour|session|weekly|daily|monthly|usage|spend)\b/i;
 const MAX_FAILS = 2;
-const LEASE_MS = 30 * 60e3; // 占用多久没续租就当上一轮已经死掉（按锁文件的修改时间算，任务每处理一项续租一次）
-const TAKEOVER_MS = 60e3; // 接管过期锁时的短锁，超过这么久算接管者死掉
+const CLAIM_STALE_MS = 30 * 60e3; // 认领后这么久没有任何进展（留痕），算认领的那一轮死掉，允许下一次认领
+const RUN_UNFINISHED_MS = 30 * 60e3; // 一轮开始后这么久还没 done，体检报没跑完
 
 export function paths(env = process.env, home = os.homedir()) {
   const dir = path.join(stateDir(env, process.platform, home), 'session-sweep');
@@ -39,8 +39,8 @@ export function paths(env = process.env, home = os.homedir()) {
     config: path.join(dir, 'config.json'),
     log: path.join(dir, 'log.jsonl'),
     state: path.join(dir, 'state.json'),
-    lock: path.join(dir, 'run.lock'),
-    takeover: path.join(dir, 'run.lock.takeover'),
+    claims: path.join(dir, 'claims'),
+    runs: path.join(dir, 'runs'),
     sessions: env.SESSION_SWEEP_SESSIONS_DIR || path.join(home, 'Library', 'Application Support', 'Claude', 'claude-code-sessions'),
     projects: env.SESSION_SWEEP_PROJECTS_DIR || path.join(home, '.claude', 'projects'),
   };
@@ -238,84 +238,68 @@ export function stoppedState(s, last) {
 
 const keyOf = (sessionId, anchor) => `${sessionId}@${anchor}`;
 
-// 原子占用：独占创建 run.lock（open 'wx'）。别人占着就返回 null。
-// 锁多久没续租（按文件修改时间，不依赖锁里的内容，空文件也能回收）超过 LEASE_MS，算上一轮死掉：
-// 先独占创建短锁 run.lock.takeover，拿到短锁的才可以删过期锁，删前再核一次仍过期；删完再按 'wx' 抢。
-export function acquireLock(p, now = Date.now()) {
-  fs.mkdirSync(p.dir, { recursive: true });
-  const runId = `${now.toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-  const tryCreate = () => {
+// 认领一次停下：claims/ 下独占创建（open 'wx'）「<sessionId>@<anchor>#<序号>」，建好就不删。
+// 同一个序号只有一个进程能建成，所以同一次停下同时只有一轮在处理；不需要删文件，也就没有「先检查、后删除」的竞态。
+// 上一个序号已经结束（认领之后有了处理完的留痕）或认领后 30 分钟没有任何新留痕（那一轮死掉），才能认领下一个序号。
+export function claim({ p, sessionId, anchor, now = Date.now() }) {
+  const key = keyOf(sessionId, anchor);
+  fs.mkdirSync(p.claims, { recursive: true });
+  const name = n => path.join(p.claims, `${key}#${n}`);
+  let gen = 0;
+  for (const f of fs.readdirSync(p.claims)) {
+    if (f.startsWith(`${key}#`)) gen = Math.max(gen, Number(f.slice(key.length + 1)) || 0);
+  }
+  if (gen) {
+    let at;
     try {
-      const fd = fs.openSync(p.lock, 'wx');
-      fs.writeSync(fd, JSON.stringify({ runId, at: new Date(now).toISOString() }));
-      fs.closeSync(fd);
-      fs.utimesSync(p.lock, now / 1000, now / 1000);
-      return true;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      return false;
-    }
-  };
-  if (tryCreate()) return runId;
-  const age = file => {
-    try {
-      return now - fs.statSync(file).mtimeMs;
+      at = fs.statSync(name(gen)).mtimeMs;
     } catch {
-      return null;
+      at = now;
     }
-  };
-  if (!(age(p.lock) > LEASE_MS)) return null;
-  // 接管者自己死在短锁里的：短锁过期就清掉（窗口只有毫秒级的接管过程）
-  if (age(p.takeover) > TAKEOVER_MS) {
-    try {
-      fs.unlinkSync(p.takeover);
-    } catch {}
-  }
-  let fd;
-  try {
-    fd = fs.openSync(p.takeover, 'wx');
-  } catch (e) {
-    if (e.code === 'EEXIST') return null; // 别人正在接管
-    throw e;
+    const after = readLog(p).filter(r => keyOf(r.sessionId, r.anchor) === key && Date.parse(r.at) >= at - 1000);
+    // switching、model_set 是处理途中的留痕；其余（switched、continued、failed、unsure……）说明认领的那一轮已经处理完这一项
+    const ended = after.some(r => r.action !== 'switching' && r.action !== 'model_set');
+    const lastMove = Math.max(at, ...after.map(r => Date.parse(r.at)));
+    if (!ended && !(now - lastMove > CLAIM_STALE_MS)) return { claimed: false, gen, reason: '另一轮正在处理这一次停下' };
   }
   try {
+    const fd = fs.openSync(name(gen + 1), 'wx');
+    fs.writeSync(fd, JSON.stringify({ at: new Date(now).toISOString(), pid: process.pid }));
     fs.closeSync(fd);
-    fs.utimesSync(p.takeover, now / 1000, now / 1000);
-    if (age(p.lock) > LEASE_MS) {
-      try {
-        fs.unlinkSync(p.lock);
-      } catch {}
-    }
-    return tryCreate() ? runId : null;
-  } finally {
-    try {
-      fs.unlinkSync(p.takeover);
-    } catch {}
+    fs.utimesSync(name(gen + 1), now / 1000, now / 1000);
+    return { claimed: true, gen: gen + 1 };
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    return { claimed: false, gen: gen + 1, reason: '另一轮刚认领了这一次停下' };
   }
 }
 
-const holds = (p, runId) => Boolean(runId) && readJson(p.lock, null)?.runId === runId;
-
-// 心跳：持有者续租，返回是否仍持有
-export function beat(p, runId, now = Date.now()) {
-  if (!holds(p, runId)) return false;
-  fs.utimesSync(p.lock, now / 1000, now / 1000);
-  return true;
+// 每一轮各写各的运行记录 runs/<runId>.json，互不覆盖；体检看最近开始的一轮跑没跑完
+function writeRun(p, runId, data) {
+  fs.mkdirSync(p.runs, { recursive: true });
+  const file = path.join(p.runs, `${runId}.json`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...readJson(file, {}), ...data }));
+  fs.renameSync(tmp, file);
 }
-
-export function lockInfo(p) {
-  return readJson(p.lock, null);
-}
-
-// 只放开自己持有的占用
-export function releaseLock(p, runId) {
-  if (!holds(p, runId)) return false;
+export function latestRuns(p) {
+  let files = [];
   try {
-    fs.unlinkSync(p.lock);
-    return true;
+    files = fs.readdirSync(p.runs).filter(f => f.endsWith('.json'));
   } catch {
-    return false;
+    return { started: null, done: null };
   }
+  const runs = files.map(f => readJson(path.join(p.runs, f), null)).filter(r => r?.startedAt);
+  const by = k => runs.filter(r => r[k]).sort((a, b) => Date.parse(b[k]) - Date.parse(a[k]))[0] || null;
+  return { started: by('startedAt'), done: by('doneAt') };
+}
+function pruneRuns(p, now) {
+  try {
+    for (const f of fs.readdirSync(p.runs)) {
+      const full = path.join(p.runs, f);
+      if (now - fs.statSync(full).mtimeMs > 3 * 864e5) fs.unlinkSync(full);
+    }
+  } catch {}
 }
 
 // 纯读：找出这一轮要处理的会话和存量，不写任何文件
@@ -422,28 +406,19 @@ export function collect({ p, now = Date.now() }) {
   return { scannedAt: new Date(now).toISOString(), config, actions, skipped, backlog };
 }
 
-// 巡检的一轮：lease 时先原子占用（占不到就不处理），再 collect，记下检查时间。
-// 没事可做的一轮当场算跑完、放开占用；有事的由任务处理完后调 done。
-export function scan({ p, now = Date.now(), lease = false }) {
-  let runId = null;
-  if (lease) {
-    runId = acquireLock(p, now);
-    if (!runId) {
-      const held = lockInfo(p);
-      return { scannedAt: new Date(now).toISOString(), config: loadConfig(p), actions: [], skipped: { leased: 1 }, busySince: held?.at || null, backlog: [] };
-    }
-  }
+// 巡检的一轮：collect 之后记下检查时间。track 时给这一轮开一份运行记录；没事可做的当场记跑完，有事的由任务处理完后 done
+export function scan({ p, now = Date.now(), track = false }) {
   const r = collect({ p, now });
+  const runId = track ? `${now.toString(36)}-${process.pid}-${Math.random().toString(36).slice(2, 6)}` : null;
+  if (runId) {
+    writeRun(p, runId, { runId, startedAt: r.scannedAt, actions: r.actions.length, ...(r.actions.length ? {} : { doneAt: r.scannedAt }) });
+    pruneRuns(p, now);
+  }
   const state = { ...(readJson(p.state, {}) || {}), lastScanAt: r.scannedAt, actions: r.actions.length, skipped: r.skipped };
-  delete state.leaseUntil; // 旧版占用字段，改用 run.lock
+  delete state.leaseUntil;
   if (!r.actions.length) state.lastRunCompletedAt = r.scannedAt;
   writeState(p, state);
-  // 先写状态再放开占用：放开之后才可能有下一轮来写状态，不会被这一轮的旧状态盖掉
-  if (!r.actions.length && runId) {
-    releaseLock(p, runId);
-    runId = null;
-  }
-  return { ...r, runId };
+  return { ...r, runId: r.actions.length ? runId : null };
 }
 
 // 先写临时文件再换名，读的一方不会读到半个文件
@@ -454,13 +429,13 @@ function writeState(p, state) {
   fs.renameSync(tmp, p.state);
 }
 
-// 本轮处理完：只有占用的持有者才能记完成时间、放开占用（被接管的旧一轮不能把新一轮记成跑完）。
-// 体检按完成时间判断巡检是不是真的跑完了，不只是扫过
+// 这一轮处理完：记进它自己的运行记录（别的轮写不到这份记录上），顺带更新 status 里显示的完成时间
 export function done({ p, now = Date.now(), runId = null }) {
-  if (!holds(p, runId)) return { released: false, reason: '不是当前占用的持有者，没记完成时间' };
-  const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: new Date(now).toISOString() };
+  const at = new Date(now).toISOString();
+  if (runId) writeRun(p, runId, { doneAt: at });
+  const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: at };
   writeState(p, state);
-  return { ...state, released: releaseLock(p, runId) };
+  return { runId, doneAt: at };
 }
 
 // 还没了结的「发送结果不确定」：没被 resolve，会话也还没被人接上（复核仍是 still 或 unknown）。不随时间过期
@@ -474,7 +449,7 @@ export function openUnsure(p) {
 
 // 动手前复核：按文件现状重新判断这个会话是否仍停在同一个锚点、没人接手。state 四选一：
 //   still   仍停在原处，可以动手
-//   taken   锚点之后有人说过话（常浩或会话自己），确定有人接手：只有这一种能当「消息已送到」的依据
+//   taken   锚点之后有人说过话（常浩或会话自己）：不用再发。它不能证明巡检这次的消息送到了（也可能是常浩自己接手）
 //   moved   已归档、模型被换成别的、或停在了别处：这次停下已经不用管
 //   unknown 拿不准（找不到索引或记录、记录正在写入）：不动手，也不当作处理完，下一轮再看
 // model：这个会话此刻应有的模型（换模型之后复核时传备用模型）；不传就不比模型。
@@ -547,7 +522,7 @@ export function selfUsage({ p, now = Date.now(), hours = 24, taskId = loadConfig
 }
 
 export function status({ p, now = Date.now() }) {
-  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), lock: lockInfo(p), openUnsure: openUnsure(p), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
+  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), runs: latestRuns(p), openUnsure: openUnsure(p), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
 }
 
 export function setConfig({ p, args, now = Date.now() }) {
@@ -583,7 +558,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const p = paths(env);
   const cmd = args._[0];
   if (cmd === 'scan') {
-    const { backlog, ...r } = scan({ p, lease: args.lease === true });
+    const { backlog, ...r } = scan({ p, track: args.track === true });
     console.log(JSON.stringify(r, null, 2));
     return 0;
   }
@@ -596,10 +571,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     console.log(JSON.stringify(done({ p, runId: typeof args.run === 'string' ? args.run : null })));
     return 0;
   }
-  if (cmd === 'beat') {
-    const ok = beat(p, typeof args.run === 'string' ? args.run : null);
-    console.log(JSON.stringify({ holding: ok }));
-    return ok ? 0 : 1;
+  if (cmd === 'claim') {
+    if (!args.session || !(Number(args.anchor) > 0)) throw new Error('claim 要 --session 和 --anchor（毫秒数）');
+    const c = claim({ p, sessionId: args.session, anchor: Number(args.anchor) });
+    console.log(JSON.stringify(c));
+    return c.claimed ? 0 : 1;
   }
   if (cmd === 'resolve') {
     console.log(JSON.stringify(record({ p, args: { ...args, kind: args.kind || 'manual', action: 'resolved', note: args.note || '常浩确认已处理' } })));
@@ -629,7 +605,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       const c = s.config;
       console.log(`备用模型：${c.backupModel || '不设（单模型额度用完只通知）'}　不碰分区：${c.excludeGroupName}　启用于：${c.startAt ? new Date(c.startAt).toISOString() : '未启用'}　每轮最多叫醒 ${c.maxWakePerRun} 个`);
       if (s.configState === 'broken') console.log('⚠ 设置文件读不出，正按默认值跑（不换模型、全部进存量）：重新运行 config 写一份');
-      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}${s.lock ? `　正在跑：自 ${s.lock.at} 起（run ${s.lock.runId}）` : ''}`);
+      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}${s.runs.started && !s.runs.started.doneAt ? `　正在跑：自 ${s.runs.started.startedAt} 起（run ${s.runs.started.runId}）` : ''}`);
       const u = s.usage24h;
       const w = n => `${(n / 1e4).toFixed(1)} 万`;
       console.log(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}），输出 ${w(u.output)}`);
@@ -641,7 +617,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     }
     return 0;
   }
-  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | beat --run <runId> | done --run <runId> | resolve --session <id> --anchor <毫秒> | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
+  console.error('用法：session-sweep.mjs scan [--track] | check --session <id> --anchor <毫秒> [--model <模型>] | claim --session <id> --anchor <毫秒> | done --run <runId> | resolve --session <id> --anchor <毫秒> | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
   return 2;
 }
 
