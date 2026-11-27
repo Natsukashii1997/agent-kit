@@ -120,7 +120,9 @@ function checkHooks({ home, run, env, dir }) {
   const handoffOk = cmds => cmds.some(c => c.includes(HANDOFF) && c.includes(runtimeHooks));
   const hasHandoff = handoffOk(promptCmds) && handoffOk(postCmds);
   const handoffConfig = fs.existsSync(path.join(dir, 'context-handoff', 'config.json'));
-  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig && hasHandoff && handoffConfig) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、7 个 hook 都在，首轮整理和上下文提醒的配置在状态目录`] });
+  // 收尾按钮框兜底（#150）
+  const hasWrapup = (settings.hooks?.Stop || []).some(g => (g.hooks || []).some(h => (h.command || '').includes('hooks/wrapup-guard.mjs')));
+  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig && hasHandoff && handoffConfig && hasWrapup) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、8 个 hook 都在，首轮整理和上下文提醒的配置在状态目录`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -132,6 +134,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
         ...(!hasPrecheck ? ['没装 bash-precheck（Bash 预检，防会话卡在没人点的安全检查批准上）'] : []),
+        ...(!hasWrapup ? ['没装 wrapup-guard（收尾按钮框兜底，Stop 钩子）'] : []),
         ...(!hasOrganize ? ['首轮整理钩子没装，或还指向 ~/.claude/hooks 下的旧位置（启动和发消息两处都要指向 runtime 副本）'] : []),
         ...(!organizeConfig ? ['状态目录里没有首轮整理配置 session-organize-once/config.json'] : []),
         ...(!hasHandoff ? ['上下文提醒钩子没装，或还指向 ~/.claude/hooks 下的旧位置（发消息和工具调用后两处都要指向 runtime 副本）'] : []),

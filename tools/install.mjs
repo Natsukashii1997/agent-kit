@@ -7,7 +7,7 @@
 //   --allow-any-branch                允许不在 main 上装（只给测试和有意为之时用）
 // 改的文件：~/.claude/settings.json（permissions.deny / ask、hooks.PreToolUse、hooks.PostToolUse 里的 skill-usage、
 //          hooks.UserPromptSubmit 里的 thinking-review-nudge、首轮整理和上下文提醒、hooks.PostToolUse 里的上下文提醒、
-//          hooks.SessionStart 里的首轮整理）、
+//          hooks.SessionStart 里的首轮整理、hooks.Stop 里的收尾按钮框兜底 wrapup-guard）、
 //          ~/.codex/hooks.json（hooks.PreToolUse）、~/.codex/rules/agent-kit.rules。
 // 首轮整理钩子（#65）的真实配置放状态目录 session-organize-once/config.json，不进仓库；没有时从旧位置迁移或拷示例，已有的不覆盖。
 // 上下文提醒钩子（#105）同样：配置和提醒记录放状态目录 context-handoff/，没有时从 ~/.claude/hooks/context-handoff/ 迁移。
@@ -25,7 +25,7 @@ const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ORGANIZE = 'session-organize-once/session_organize_once.py';
 const HANDOFF = 'context-handoff/context_handoff.py';
 // 旧路径 ~/.claude/hooks/session-organize-once/…、~/.claude/hooks/context-handoff/… 也带「hooks/<同名>/…」，重装时会被认出来换掉
-const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs', ORGANIZE, HANDOFF];
+const HOOK_FILES = ['guard-git.mjs', 'lessons-remind.mjs', 'skill-usage.mjs', 'thinking-review-nudge.mjs', 'bash-precheck.mjs', 'wrapup-guard.mjs', ORGANIZE, HANDOFF];
 const TIMEOUT_SEC = 10;
 const ORGANIZE_TIMEOUT_SEC = 5;
 export const ORGANIZE_LEGACY_DIR = home => path.join(home, '.claude', 'hooks', 'session-organize-once');
@@ -144,6 +144,12 @@ export function ourPostGroups(tool, node = stableNode(), base = KIT, python = st
   ];
 }
 
+// 一轮结束时的 hook（Stop）：只有 Claude 的收尾按钮框兜底（#150）。Codex 没有 wrap_up 按钮框
+export function ourStopGroups(tool, node = stableNode(), base = KIT) {
+  if (tool !== 'claude') return [];
+  return [{ hooks: [{ type: 'command', command: `"${node}" "${path.join(base, 'hooks', 'wrapup-guard.mjs')}"`, timeout: TIMEOUT_SEC }] }];
+}
+
 // 去掉某个事件下已有的 agent-kit hook（别人的 hook 原样保留），再按需加上新的
 export function mergeHooks(config, groups, { remove = false, event = 'PreToolUse' } = {}) {
   const out = structuredClone(config || {});
@@ -201,6 +207,21 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   if (t.status !== 0 || !String(t.stdout).includes('thinking-review')) problems.push(`thinking-review-nudge 没对「思维评审」给出提醒（退出码 ${t.status}，${t.stderr || t.stdout}）`);
   const b = run('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } });
   if (b.status !== 0 || !String(b.stdout).includes('"deny"')) problems.push(`bash-precheck 没拦下 rm 变量加通配符（退出码 ${b.status}，${b.stderr || b.stdout}）`);
+  // 收尾按钮框兜底（#150）：〔等你决定〕却没带 ask 的 wrap_up，应拦下让模型补
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-wrapup-'));
+  const wtFile = path.join(wt, 't.jsonl');
+  fs.writeFileSync(wtFile, [
+    { type: 'user', entrypoint: 'claude-desktop', message: { content: '自检' } },
+    { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕自检\n**下一步**：回复「合并」' }] } },
+  ].map(x => JSON.stringify(x)).join('\n'));
+  const w = spawnSync(node, [path.join(base, 'hooks', 'wrapup-guard.mjs')], {
+    input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'selftest', transcript_path: wtFile }),
+    encoding: 'utf8',
+    env: { ...process.env, AGENT_KIT_NO_LOG: '1', AGENT_KIT_STATE_DIR: wt },
+    timeout: 10000,
+  });
+  fs.rmSync(wt, { recursive: true, force: true });
+  if (w.status !== 0 || !String(w.stdout).includes('"block"')) problems.push(`wrapup-guard 没对缺按钮框的〔等你决定〕要求补（退出码 ${w.status}，${w.stderr || w.stdout}）`);
   // 首轮整理（#65）：Python 能跑、示例配置能读；不在桌面应用里时应原样放行（输出 {}）
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-organize-'));
   const env = { ...process.env };
@@ -303,6 +324,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     after = mergeHooks(after, ourPostGroups('claude', stableNode(), runtime, stablePython()), { remove, event: 'PostToolUse' });
     after = mergeHooks(after, ourPromptGroups('claude', stableNode(), runtime), { remove, event: 'UserPromptSubmit' });
     after = mergeHooks(after, ourStartGroups('claude', stablePython(), runtime), { remove, event: 'SessionStart' });
+    after = mergeHooks(after, ourStopGroups('claude', stableNode(), runtime), { remove, event: 'Stop' });
     plan.push(`Claude Code：${file}`);
     if (!remove) plan.push(`  ${ensureOrganizeConfig(sd, home)}`, `  ${ensureHandoffConfig(sd, home)}`);
     if (remove) {
@@ -311,7 +333,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;
       const gone = key => (before.permissions?.[key] || []).filter(r => !(after.permissions?.[key] || []).includes(r)).length;
-      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage 和上下文提醒，hooks.UserPromptSubmit 放入 thinking-review-nudge、首轮整理和上下文提醒，hooks.SessionStart 放入首轮整理（旧的 agent-kit hook 和 ~/.claude/hooks 下的旧首轮整理、旧上下文提醒先去掉）`);
+      plan.push(`  permissions.deny 新增 ${n('deny')} 条、去掉 ${gone('deny')} 条，permissions.ask 新增 ${n('ask')} 条、去掉 ${gone('ask')} 条（已有的不重复加；去掉的是以前装进去、配置里已删的）；hooks.PreToolUse 放入 guard-git、lessons-remind、thinking-review-nudge、bash-precheck，hooks.PostToolUse 放入 skill-usage 和上下文提醒，hooks.UserPromptSubmit 放入 thinking-review-nudge、首轮整理和上下文提醒，hooks.SessionStart 放入首轮整理，hooks.Stop 放入 wrapup-guard（旧的 agent-kit hook 和 ~/.claude/hooks 下的旧首轮整理、旧上下文提醒先去掉）`);
     }
     if (JSON.stringify(before) !== JSON.stringify(after)) writes.push([file, `${JSON.stringify(after, null, 2)}\n`]);
     else plan.push('  没有变化');
