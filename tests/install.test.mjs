@@ -92,6 +92,8 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   const [promptOrganize] = after.hooks.UserPromptSubmit[1].hooks;
   assert.ok(promptOrganize.command.endsWith(organizeCmd), promptOrganize.command);
   assert.equal(after.hooks.SessionStart.length, 1);
+  assert.equal(after.hooks.Stop.length, 1, '收尾按钮框兜底（#150）');
+  assert.ok(after.hooks.Stop[0].hooks[0].command.endsWith(`${path.join(state, 'runtime', 'hooks', 'wrapup-guard.mjs')}"`), after.hooks.Stop[0].hooks[0].command);
   assert.equal(after.hooks.SessionStart[0].matcher, 'startup|fork');
   assert.deepEqual(after.hooks.SessionStart[0].hooks, [promptOrganize]);
   assert.equal(promptOrganize.timeout, 5);
