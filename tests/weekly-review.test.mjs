@@ -255,3 +255,24 @@ test('再犯：写的是被并入的旧编号，算到合并后的条目上（�
   const j = buildJson({ workRoot: root });
   assert.deepEqual(j.recurrences.map(r => [r.id, r.count]), [['G-46', 1]]);
 });
+
+test('参数严格解析：--help 只打印用法、不写文件；不认识的参数报错退出（复盘 B1，#154）', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'wr-cli-'));
+  const script = fileURLToPath(new URL('../tools/weekly-review.mjs', import.meta.url));
+  const run = args => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, AGENT_KIT_WORK_ROOT: state, AGENT_KIT_STATE_DIR: state } });
+
+  const help = run(['--help']);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /用法/);
+  assert.deepEqual(fs.readdirSync(state), []);
+
+  const typo = run(['--stdot']);
+  assert.equal(typo.status, 2);
+  assert.match(typo.stderr, /不认识的参数：--stdot/);
+  assert.deepEqual(fs.readdirSync(state), []);
+
+  const both = run(['--stdout', '--json']);
+  assert.equal(both.status, 2);
+  assert.deepEqual(fs.readdirSync(state), []);
+});

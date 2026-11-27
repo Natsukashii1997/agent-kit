@@ -269,14 +269,34 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWo
   return { day, text: `${lines.join('\n')}\n` };
 }
 
+export const USAGE = `用法：node tools/weekly-review.mjs [--stdout | --json | --help]
+  不带参数  生成本周汇总，写到状态目录的 weekly/<日期>.md，打印文件路径
+  --stdout  只打印汇总，不写文件
+  --json    打印结构化数据，不写文件
+  --help    只打印这段用法，不生成任何东西`;
+
+// 不认识的参数直接报错退出，不当成没传（复盘 B1：2026-11-26 传 --help 被忽略，整套跑了一遍并写了文件）
+export function parseCli(argv) {
+  const known = new Set(['--stdout', '--json', '--help', '-h']);
+  const unknown = argv.filter(a => !known.has(a));
+  if (unknown.length) return { error: `不认识的参数：${unknown.join(' ')}` };
+  if (argv.includes('--stdout') && argv.includes('--json')) return { error: '--stdout 和 --json 只能选一个' };
+  return { help: argv.includes('--help') || argv.includes('-h'), json: argv.includes('--json'), stdout: argv.includes('--stdout') };
+}
+
 if (isEntry(import.meta.url)) {
-  try {
+  const cli = parseCli(process.argv.slice(2));
+  if (cli.error) {
+    console.error(`${cli.error}\n${USAGE}`);
+    process.exitCode = 2;
+  } else if (cli.help) console.log(USAGE);
+  else try {
     // --json 不用 process.exit 收尾：macOS 上写管道是异步的，提前退出会截断输出
-    if (process.argv.includes('--json')) process.stdout.write(`${JSON.stringify(buildJson(), null, 2)}\n`);
+    if (cli.json) process.stdout.write(`${JSON.stringify(buildJson(), null, 2)}\n`);
     else {
       const dir = stateDir();
       const { day, text } = build({ dir });
-      if (process.argv.includes('--stdout')) process.stdout.write(text);
+      if (cli.stdout) process.stdout.write(text);
       else {
         const out = path.join(dir, 'weekly');
         fs.mkdirSync(out, { recursive: true });
