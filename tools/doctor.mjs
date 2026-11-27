@@ -294,6 +294,52 @@ function checkAutoMemory({ home }) {
   };
 }
 
+// 驿窗「以我的身份发送」开着时，智能体经驿窗发的话去掉来源标签、按用户输入提交，
+// 文字上分不出是不是常浩本人（《工程流程》第 5 节「谁说的算常浩本人」）。
+// 只有明确读到 false 才给 ✓；开着、读不了、读不懂、字段缺失或不是布尔值都报 ⚠（确认不了按开着处理）。
+export const POSTPANE_SETTINGS = home => path.join(home, 'Library', 'Application Support', 'app.postpane.mac', 'settings.json');
+
+function checkPostpaneIdentity({ home }) {
+  const name = '驿窗「以我的身份发送」';
+  const file = POSTPANE_SETTINGS(home);
+  const unsure = why => ({ name, status: 'warn', detail: [`${why}，确认不了开关状态；确认前按开着处理，要常浩本人回话的事用应用内问答框`] });
+  try {
+    fs.statSync(file);
+  } catch (err) {
+    // 只有确实不存在才算「没装」；父目录没权限这类错误不能当成没有文件
+    if (err.code === 'ENOENT') return { name, status: 'info', detail: ['没有驿窗设置文件（没装驿窗或还没打开过），没查；用到驿窗转来的话之前按开着处理'] };
+    return unsure(`驿窗设置文件查不了（${err.code || err.message}）`);
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return unsure(`驿窗设置文件读不了（${err.code || err.message}）`);
+  }
+  if (!text.trim()) return unsure('驿窗设置文件是空的');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return unsure('驿窗设置文件读不懂');
+  }
+  const isObj = o => o !== null && typeof o === 'object' && !Array.isArray(o);
+  if (!isObj(parsed)) return unsure('驿窗设置文件的顶层不是对象');
+  // 有 settings 就只认 settings 里的；settings 不是对象时不退回去读顶层
+  if ('settings' in parsed && !isObj(parsed.settings)) return unsure('驿窗设置里的 settings 不是对象');
+  const holder = 'settings' in parsed ? parsed.settings : parsed;
+  const v = holder.agentMessagesAsUser;
+  if (v === false) return { name, status: 'ok', detail: ['关着（驿窗侧栏和输入框打的字算常浩本人）'] };
+  if (v === true) {
+    return {
+      name,
+      status: 'warn',
+      detail: ['开着：智能体经驿窗发的话和常浩打的字分不出来。开着期间文字只用于普通对话和合并，其余要他本人回话的事用应用内问答框', '要关：驿窗设置页里标橙色「注意」的那个开关'],
+    };
+  }
+  return unsure(`驿窗设置里的 agentMessagesAsUser 是 ${JSON.stringify(v)}（缺失或不是布尔值）`);
+}
+
 // 分开数「真正提醒」和「关键词匹配」（瘦身提案 M4）：同一会话同一条只提醒一次，匹配数会把常见词放大几十倍。
 // 按提醒次数排，每条写「提醒 X 次（Y 个会话）/ 匹配 Z 次」。
 function checkLessonHits({ now, dir }) {
@@ -427,6 +473,7 @@ export function runDoctor(deps = {}) {
     checkInstructionSync(ctx),
     ...checkGlobalInstructions(ctx),
     checkAutoMemory(ctx),
+    checkPostpaneIdentity(ctx),
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
     ...checkRepos(ctx),

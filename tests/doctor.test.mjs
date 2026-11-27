@@ -256,3 +256,59 @@ test('近 7 天坑提醒：分开数真正提醒和关键词匹配，按提醒�
   assert.equal(r.detail[0], '一共提醒 3 次，3 个会话，平均每会话 1.0 条');
   assert.equal(r.detail[1], 'G-04 提醒 2 次（2 个会话）/ 匹配 2 次、G-03 提醒 1 次（1 个会话）/ 匹配 4 次');
 });
+
+test('驿窗「以我的身份发送」：只有明确读到关着才通过；开着、读不懂、空文件、字段缺失或不是布尔值都报 ⚠；没有设置文件只提示没查（#154）', () => {
+  const dirOf = home => path.join(home, 'Library', 'Application Support', 'app.postpane.mac');
+  const check = home => byName(runDoctor({ home, env: {}, dir: stateOf(home), run: realRun, config: {} }), '驿窗「以我的身份发送」');
+  const withSettings = text => {
+    const home = fakeHome();
+    fs.mkdirSync(dirOf(home), { recursive: true });
+    fs.writeFileSync(path.join(dirOf(home), 'settings.json'), text);
+    return check(home);
+  };
+
+  const none = check(fakeHome());
+  assert.equal(none.status, 'info');
+  assert.match(none.detail.join('\n'), /按开着处理/);
+
+  const on = withSettings(JSON.stringify({ settings: { agentMessages: true, agentMessagesAsUser: true } }));
+  assert.equal(on.status, 'warn');
+  assert.match(on.detail.join('\n'), /问答框/);
+
+  assert.equal(withSettings(JSON.stringify({ settings: { agentMessagesAsUser: false } })).status, 'ok');
+  assert.equal(withSettings(JSON.stringify({ agentMessagesAsUser: false })).status, 'ok');
+
+  for (const [label, text] of [
+    ['读不懂', '{ 不是 json'],
+    ['空文件', '  \n'],
+    ['字段缺失', JSON.stringify({ settings: { agentMessages: true } })],
+    ['字符串', JSON.stringify({ settings: { agentMessagesAsUser: 'false' } })],
+    ['数字', JSON.stringify({ settings: { agentMessagesAsUser: 0 } })],
+    ['null', JSON.stringify({ settings: { agentMessagesAsUser: null } })],
+    ['settings 不是对象', JSON.stringify({ settings: 'x' })],
+    ['settings 不是对象、顶层却写着关', JSON.stringify({ settings: 'x', agentMessagesAsUser: false })],
+    ['settings 是 null、顶层却写着关', JSON.stringify({ settings: null, agentMessagesAsUser: false })],
+    ['settings 是数组', JSON.stringify({ settings: [], agentMessagesAsUser: false })],
+    ['字段只在顶层、settings 里没有', JSON.stringify({ settings: {}, agentMessagesAsUser: false })],
+    ['顶层不是对象', '[]'],
+  ]) {
+    const r = withSettings(text);
+    assert.equal(r.status, 'warn', label);
+    assert.match(r.detail.join('\n'), /按开着处理/, label);
+  }
+
+  // 父目录没权限时查不了文件：不能当成「没有设置文件」
+  if (process.getuid?.() !== 0) {
+    const locked = fakeHome();
+    fs.mkdirSync(dirOf(locked), { recursive: true });
+    fs.writeFileSync(path.join(dirOf(locked), 'settings.json'), JSON.stringify({ settings: { agentMessagesAsUser: false } }));
+    fs.chmodSync(dirOf(locked), 0o000);
+    try {
+      const r = check(locked);
+      assert.equal(r.status, 'warn');
+      assert.match(r.detail.join('\n'), /EACCES/);
+    } finally {
+      fs.chmodSync(dirOf(locked), 0o755);
+    }
+  }
+});
