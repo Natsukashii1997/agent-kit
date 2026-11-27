@@ -150,6 +150,38 @@ test('同一条消息分块重复写进记录：只算一次，不影响判断',
   assert.equal(verdict([user('x'), w, w, result('u-wrap'), said(close('等你决定'))]), 'pass:has-buttons');
 });
 
+test('同一次回复里并行两个工具调用：各写一行、共用 message.id、序号都是 0，两个都要算', () => {
+  // 真实记录长这样：Claude Code 把同一次回复的每个内容块各写一行（会话 8ea5dcae 17:09:20 被误拦）
+  const block = (uuid, x) => ({ type: 'assistant', uuid, message: { id: 'm-same', content: [x] } });
+  const bash = block('a1', { type: 'tool_use', id: 'u-bash', name: 'Bash', input: { command: 'ls' } });
+  const wrap = block('a2', { type: 'tool_use', id: 'u-wrap', name: WRAP, input: { recap: 'r', ask: '合并吗？', actions: [{ label: '合并' }] } });
+  assert.equal(verdict([user('x'), bash, wrap, result('u-bash'), result('u-wrap'), said(close('等你决定'))]), 'pass:has-buttons');
+  // 同一次回复里两段文字（各一行、序号都是 0）：最后那段才是收尾
+  const t1 = block('t1', { type: 'text', text: '先说一句' });
+  const t2 = block('t2', { type: 'text', text: close('等你决定') });
+  const turn = lastTurn(lines([snapshot, user('x'), t1, t2]));
+  assert.deepEqual(turn.texts, ['先说一句', close('等你决定')]);
+});
+
+test('去重的边界：同一行重写、单行多块、没有 uuid、工具缺 id（#158-R2）', () => {
+  const rec = (x, extra = {}) => ({ type: 'assistant', message: { id: 'm-same', content: Array.isArray(x) ? x : [x] }, ...extra });
+  const turnOf = records => lastTurn(lines([snapshot, user('x'), ...records]));
+  const text = t => ({ type: 'text', text: t });
+  // 同一行（同一 uuid）写了两遍：文字只算一次
+  const once = rec(text('收尾'), { uuid: 'a1' });
+  assert.deepEqual(turnOf([once, once]).texts, ['收尾']);
+  // 单行多块：按序号区分，两块都留
+  assert.deepEqual(turnOf([rec([text('一'), text('二')], { uuid: 'a1' })]).texts, ['一', '二']);
+  // 没有 uuid、分行写、共用 message.id、序号都是 0：不同的块都留，最后一段仍是收尾
+  const split = turnOf([rec(text('正文')), rec(text(close('等你决定')))]);
+  assert.deepEqual(split.texts, ['正文', close('等你决定')]);
+  // 没有 uuid、同一行一字不差写了两遍：只算一次
+  assert.deepEqual(turnOf([rec(text('收尾')), rec(text('收尾'))]).texts, ['收尾']);
+  // 工具调用缺 id、没有 uuid、分行写：两个都留
+  const noId = name => rec({ type: 'tool_use', name, input: {} });
+  assert.deepEqual(turnOf([noId('Bash'), noId(WRAP)]).tools.map(t => t.name), ['Bash', WRAP]);
+});
+
 function setup(records) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-wrapup-test-'));
   const transcript = path.join(dir, 't.jsonl');
