@@ -150,6 +150,19 @@ test('同一条消息分块重复写进记录：只算一次，不影响判断',
   assert.equal(verdict([user('x'), w, w, result('u-wrap'), said(close('等你决定'))]), 'pass:has-buttons');
 });
 
+test('同一次回复里并行两个工具调用：各写一行、共用 message.id、序号都是 0，两个都要算', () => {
+  // 真实记录长这样：Claude Code 把同一次回复的每个内容块各写一行（会话 8ea5dcae 17:09:20 被误拦）
+  const block = (uuid, x) => ({ type: 'assistant', uuid, message: { id: 'm-same', content: [x] } });
+  const bash = block('a1', { type: 'tool_use', id: 'u-bash', name: 'Bash', input: { command: 'ls' } });
+  const wrap = block('a2', { type: 'tool_use', id: 'u-wrap', name: WRAP, input: { recap: 'r', ask: '合并吗？', actions: [{ label: '合并' }] } });
+  assert.equal(verdict([user('x'), bash, wrap, result('u-bash'), result('u-wrap'), said(close('等你决定'))]), 'pass:has-buttons');
+  // 同一次回复里两段文字（各一行、序号都是 0）：最后那段才是收尾
+  const t1 = block('t1', { type: 'text', text: '先说一句' });
+  const t2 = block('t2', { type: 'text', text: close('等你决定') });
+  const turn = lastTurn(lines([snapshot, user('x'), t1, t2]));
+  assert.deepEqual(turn.texts, ['先说一句', close('等你决定')]);
+});
+
 function setup(records) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-wrapup-test-'));
   const transcript = path.join(dir, 't.jsonl');
