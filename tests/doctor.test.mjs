@@ -271,6 +271,11 @@ test('会话续跑巡检：没装给 ·；按时在跑给 ✓；超时或有失�
   assert.equal(check().status, 'warn', '最近一轮开始 35 分钟还没 done');
   run('r2', 35, 1);
   assert.equal(check().status, 'ok');
+  run('r0', 60); // 更早开始、一直没跑完的一轮，后面的轮次都跑完了
+  const old = check();
+  assert.equal(old.status, 'warn', '较早没跑完的那一轮也要报');
+  assert.match(old.detail.join('\n'), /1 轮扫描后 30 分钟还没跑完/);
+  fs.unlinkSync(path.join(q, 'runs', 'r0.json'));
   fs.rmSync(path.join(q, 'runs'), { recursive: true });
   write([row(1, 'unsure', 'u')]);
   const unsure = check();

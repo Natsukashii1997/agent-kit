@@ -29,7 +29,11 @@ export const DEFAULT_CONFIG = {
 const WAKE = new Set(['switch', 'continue', 'nudge']);
 const ACCOUNT_LIMITS = /^(5-hour|session|weekly|daily|monthly|usage|spend)\b/i;
 const MAX_FAILS = 2;
-const CLAIM_STALE_MS = 30 * 60e3; // 认领后这么久没有任何进展（留痕），算认领的那一轮死掉，允许下一次认领
+const CLAIM_STALE_MS = 30 * 60e3; // 认领后这么久没有任何进展（留痕），算认领的那一轮死掉；只有还没开始发消息的才允许下一次认领
+// 留痕动作分三类：认领规则和未决清单都按这个分
+const TERMINAL = new Set(['switched', 'continued', 'nudged', 'notified', 'excluded', 'unsure', 'taken']); // 这一次停下处理完了，不再自动处理
+const RETRYABLE = new Set(['failed', 'skipped']); // 这一次没做成、也没发出消息，可以再认领重来
+const SENDING = 'sending'; // 发消息之前记；之后没有终态就说明发送途中断了，不知道发没发出去
 const RUN_UNFINISHED_MS = 30 * 60e3; // 一轮开始后这么久还没 done，体检报没跑完
 
 export function paths(env = process.env, home = os.homedir()) {
@@ -239,8 +243,12 @@ export function stoppedState(s, last) {
 const keyOf = (sessionId, anchor) => `${sessionId}@${anchor}`;
 
 // 认领一次停下：claims/ 下独占创建（open 'wx'）「<sessionId>@<anchor>#<序号>」，建好就不删。
-// 同一个序号只有一个进程能建成，所以同一次停下同时只有一轮在处理；不需要删文件，也就没有「先检查、后删除」的竞态。
-// 上一个序号已经结束（认领之后有了处理完的留痕）或认领后 30 分钟没有任何新留痕（那一轮死掉），才能认领下一个序号。
+// 同一个序号只有一个进程能建成；任务之后每条留痕都带上这个序号（record --gen），认领规则按序号认留痕，不靠时间推断。
+// 能不能认领下一个序号，看上一个序号的留痕：
+//   有终态（switched、continued、unsure……）    不能：这一次停下已经处理完，不能凭旧的扫描结果再来一遍
+//   有 failed / skipped                          能：没做成、也没发出消息
+//   有 sending、没有终态                          不能：发送途中断了，不知道发没发出去，交常浩（进未决清单）
+//   只有 switching / model_set，或什么都没有      最后一次进展后 30 分钟没动静才能（还没开始发消息，重来不会多发）
 export function claim({ p, sessionId, anchor, now = Date.now() }) {
   const key = keyOf(sessionId, anchor);
   fs.mkdirSync(p.claims, { recursive: true });
@@ -256,11 +264,14 @@ export function claim({ p, sessionId, anchor, now = Date.now() }) {
     } catch {
       at = now;
     }
-    const after = readLog(p).filter(r => keyOf(r.sessionId, r.anchor) === key && Date.parse(r.at) >= at); // 只看这个序号认领之后的留痕：上一个序号的终态留痕不能算成这一个处理完了
-    // switching、model_set 是处理途中的留痕；其余（switched、continued、failed、unsure……）说明认领的那一轮已经处理完这一项
-    const ended = after.some(r => r.action !== 'switching' && r.action !== 'model_set');
-    const lastMove = Math.max(at, ...after.map(r => Date.parse(r.at)));
-    if (!ended && !(now - lastMove > CLAIM_STALE_MS)) return { claimed: false, gen, reason: '另一轮正在处理这一次停下' };
+    // 带序号的留痕按序号认；没带序号的（旧版提示词写的）只认严格晚于认领时刻的
+    const mine = readLog(p).filter(r => keyOf(r.sessionId, r.anchor) === key && (r.gen != null ? Number(r.gen) === gen : Date.parse(r.at) > at));
+    if (mine.some(r => TERMINAL.has(r.action))) return { claimed: false, gen, reason: '这一次停下已经处理完' };
+    if (!mine.some(r => RETRYABLE.has(r.action))) {
+      if (mine.some(r => r.action === SENDING)) return { claimed: false, gen, reason: '上一次认领在发消息途中断了，不知道发没发出去，交常浩' };
+      const lastMove = Math.max(at, ...mine.map(r => Date.parse(r.at)));
+      if (!(now - lastMove > CLAIM_STALE_MS)) return { claimed: false, gen, reason: '另一轮正在处理这一次停下' };
+    }
   }
   try {
     const fd = fs.openSync(name(gen + 1), 'wx');
@@ -287,11 +298,13 @@ export function latestRuns(p) {
   try {
     files = fs.readdirSync(p.runs).filter(f => f.endsWith('.json'));
   } catch {
-    return { started: null, done: null };
+    return { started: null, done: null, unfinished: [] };
   }
   const runs = files.map(f => readJson(path.join(p.runs, f), null)).filter(r => r?.startedAt);
   const by = k => runs.filter(r => r[k]).sort((a, b) => Date.parse(b[k]) - Date.parse(a[k]))[0] || null;
-  return { started: by('startedAt'), done: by('doneAt') };
+  // 所有还没 done 的轮次（不只最近开始的那一轮：两轮真重叠时，旧的一轮没跑完也要看得见）
+  const unfinished = runs.filter(r => !r.doneAt).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  return { started: by('startedAt'), done: by('doneAt'), unfinished };
 }
 function pruneRuns(p, now) {
   try {
@@ -313,8 +326,8 @@ export function collect({ p, now = Date.now() }) {
   for (const r of log) {
     const k = keyOf(r.sessionId, r.anchor);
     if (r.action === 'model_set' || r.action === 'switching') modelSet.add(k);
-    else if (r.action === 'resolved') continue;
-    else if (r.action !== 'failed') handled.add(k);
+    else if (r.action === 'resolved' || r.action === 'skipped') continue; // skipped：认领后复核不是 still，没动手，下一轮照常再看
+    else if (r.action !== 'failed') handled.add(k); // 含 sending：发送途中断了的不自动重来，进未决清单
     else if ((fails[k] = (fails[k] || 0) + 1) >= MAX_FAILS) handled.add(k);
   }
   // 只接一次：同一个会话 24 小时内已经因为同一类原因被叫醒过，又停在这类原因上，就不再叫醒，改为通知
@@ -414,10 +427,14 @@ export function scan({ p, now = Date.now(), track = false }) {
     writeRun(p, runId, { runId, startedAt: r.scannedAt, actions: r.actions.length, ...(r.actions.length ? {} : { doneAt: r.scannedAt }) });
     pruneRuns(p, now);
   }
-  const state = { ...(readJson(p.state, {}) || {}), lastScanAt: r.scannedAt, actions: r.actions.length, skipped: r.skipped };
-  delete state.leaseUntil;
-  if (!r.actions.length) state.lastRunCompletedAt = r.scannedAt;
-  writeState(p, state);
+  const prev = readJson(p.state, {}) || {};
+  // 只往后走：两轮重叠时，先开始、后写的那一轮不会把检查时间写回更早
+  if (!(Date.parse(prev.lastScanAt) > now)) {
+    const state = { ...prev, lastScanAt: r.scannedAt, actions: r.actions.length, skipped: r.skipped };
+    delete state.leaseUntil;
+    if (!r.actions.length) state.lastRunCompletedAt = r.scannedAt;
+    writeState(p, state);
+  }
   return { ...r, runId: r.actions.length ? runId : null };
 }
 
@@ -433,17 +450,24 @@ function writeState(p, state) {
 export function done({ p, now = Date.now(), runId = null }) {
   const at = new Date(now).toISOString();
   if (runId) writeRun(p, runId, { doneAt: at });
-  const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: at };
-  writeState(p, state);
+  const prev = readJson(p.state, {}) || {};
+  if (!(Date.parse(prev.lastRunCompletedAt) > now)) writeState(p, { ...prev, lastRunCompletedAt: at });
   return { runId, doneAt: at };
 }
 
 // 还没了结的「发送结果不确定」：没被 resolve，会话也还没被人接上（复核仍是 still 或 unknown）。不随时间过期
-export function openUnsure(p) {
+// 也包括「发消息途中断了」：记了 sending、30 分钟后还没有终态
+export function openUnsure(p, now = Date.now()) {
   const log = readLog(p);
   const resolved = new Set(log.filter(r => r.action === 'resolved').map(r => keyOf(r.sessionId, r.anchor)));
   const seen = new Map();
-  for (const r of log) if (r.action === 'unsure' && !resolved.has(keyOf(r.sessionId, r.anchor))) seen.set(keyOf(r.sessionId, r.anchor), r);
+  const ended = new Set(log.filter(r => TERMINAL.has(r.action)).map(r => keyOf(r.sessionId, r.anchor)));
+  for (const r of log) {
+    const k = keyOf(r.sessionId, r.anchor);
+    if (resolved.has(k)) continue;
+    if (r.action === 'unsure') seen.set(k, r);
+    else if (r.action === SENDING && !ended.has(k) && now - Date.parse(r.at) > CLAIM_STALE_MS) seen.set(k, { ...r, note: `发消息途中断了，不知道发没发出去（${r.note || ''}）` });
+  }
   return [...seen.values()].filter(r => ['still', 'unknown'].includes(check({ p, sessionId: r.sessionId, anchor: r.anchor }).state));
 }
 
@@ -476,17 +500,19 @@ export function check({ p, sessionId, anchor, model }) {
 }
 
 // model_set：已换好模型、续跑消息还没发（不算处理完，下一轮只补发消息）
+// sending：发消息之前记；skipped：认领后复核不是 still，没动手（可再认领，不算失败）
 // switching：换模型之前记的意图（换完来不及记 model_set 就崩了，下一轮也知道是巡检换的）
 // unsure：消息发送报错、又看不出送没送到。不自动重发（可能已送到）；是未决事项，体检一直报，直到会话被接上或 resolve
 // taken：发送报错，但复核看到锚点之后已有人说话（不等于本次消息送到），不用再发
 // resolved：常浩确认 unsure 那一项处理过了
-const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'switching', 'model_set', 'unsure', 'taken', 'resolved']);
+const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'switching', 'model_set', 'sending', 'skipped', 'unsure', 'taken', 'resolved']);
 
 export function record({ p, now = Date.now(), args }) {
   if (!args.session || !(Number(args.anchor) > 0) || !ACTIONS.has(args.action) || !args.kind) {
     throw new Error(`record 要 --session、--anchor（毫秒数）、--kind，--action 取 ${[...ACTIONS].join(' / ')}`);
   }
   const row = { at: new Date(now).toISOString(), sessionId: args.session, anchor: Number(args.anchor), kind: args.kind, action: args.action, from: args.from || null, to: args.to || null, note: args.note || '' };
+  if (args.gen != null && args.gen !== true) row.gen = Number(args.gen); // 这条留痕属于第几次认领
   fs.mkdirSync(p.dir, { recursive: true });
   fs.appendFileSync(p.log, `${JSON.stringify(row)}\n`);
   return row;
@@ -551,7 +577,7 @@ export function parseArgs(argv) {
 }
 
 const KIND = { model_limit: '单模型额度', account_limit: '账户额度', transient: '临时故障', needs_owner: '认证/订阅', other_error: '其他报错', background: '后台进行中' };
-const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', switching: '准备换模型', model_set: '已换模型待续跑', unsure: '发送结果不确定', taken: '已有人接手', resolved: '已确认处理' };
+const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', switching: '准备换模型', model_set: '已换模型待续跑', sending: '正在发消息', skipped: '复核后没动手', unsure: '发送结果不确定', taken: '已有人接手', resolved: '已确认处理' };
 
 export function main(argv = process.argv.slice(2), env = process.env) {
   const args = parseArgs(argv);
@@ -573,9 +599,9 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   }
   if (cmd === 'claim') {
     if (!args.session || !(Number(args.anchor) > 0)) throw new Error('claim 要 --session 和 --anchor（毫秒数）');
-    const c = claim({ p, sessionId: args.session, anchor: Number(args.anchor) });
-    console.log(JSON.stringify(c));
-    return c.claimed ? 0 : 1;
+    // 认领没抢到是正常结果，退出码 0、看 JSON 里的 claimed；退出码非 0 只表示命令本身出错（读写失败等）
+    console.log(JSON.stringify(claim({ p, sessionId: args.session, anchor: Number(args.anchor) })));
+    return 0;
   }
   if (cmd === 'resolve') {
     console.log(JSON.stringify(record({ p, args: { ...args, kind: args.kind || 'manual', action: 'resolved', note: args.note || '常浩确认已处理' } })));
@@ -605,7 +631,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       const c = s.config;
       console.log(`备用模型：${c.backupModel || '不设（单模型额度用完只通知）'}　不碰分区：${c.excludeGroupName}　启用于：${c.startAt ? new Date(c.startAt).toISOString() : '未启用'}　每轮最多叫醒 ${c.maxWakePerRun} 个`);
       if (s.configState === 'broken') console.log('⚠ 设置文件读不出，正按默认值跑（不换模型、全部进存量）：重新运行 config 写一份');
-      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}${s.runs.started && !s.runs.started.doneAt ? `　正在跑：自 ${s.runs.started.startedAt} 起（run ${s.runs.started.runId}）` : ''}`);
+      console.log(`上次检查：${s.runs.started?.startedAt || s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.runs.done?.doneAt || s.state?.lastRunCompletedAt || '没有记录'}${s.runs.unfinished.map(r => `　没跑完：自 ${r.startedAt} 起（run ${r.runId}）`).join('')}`);
       const u = s.usage24h;
       const w = n => `${(n / 1e4).toFixed(1)} 万`;
       console.log(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}），输出 ${w(u.output)}`);

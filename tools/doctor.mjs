@@ -340,8 +340,8 @@ function checkSessionSweep({ now, dir, env, home }) {
   const sdir = path.join(dir, 'session-sweep');
   const sp = { ...sweepPaths(env, home), dir: sdir, config: path.join(sdir, 'config.json'), log: path.join(sdir, 'log.jsonl'), state: path.join(sdir, 'state.json'), claims: path.join(sdir, 'claims'), runs: path.join(sdir, 'runs') };
   // 发消息结果不确定的是未决事项：不随时间过期，也不因为设置文件没了就不报，直到会话被人接上或常浩 resolve
-  const open = openUnsure(sp);
-  const openLine = `有 ${open.length} 项发消息结果不确定、还没了结（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼；处理过就 resolve`;
+  const open = openUnsure(sp, now);
+  const openLine = `有 ${open.length} 项发消息结果不确定或发送途中断了、还没了结（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼；处理过就 resolve`;
   const cfgText = readText(sp.config);
   if (cfgText == null) return open.length ? { name, status: 'warn', detail: ['没有设置文件 session-sweep/config.json，但留痕里还有未决事项', openLine] } : { name, status: 'info', detail: ['没装（状态目录里没有 session-sweep/config.json）'] };
   const cfg = jsonOr(cfgText, null);
@@ -370,11 +370,14 @@ function checkSessionSweep({ now, dir, env, home }) {
     detail.push('超过 45 分钟没检查：看桌面版是不是没开，或巡检的定时任务是否被停用、运行是否报错');
   }
   // 最近开始的一轮过了 30 分钟还没有完成记录：中途崩了或卡住了
-  const unfinished = runs.started ? !runs.started.doneAt && now - Date.parse(runs.started.startedAt) > 30 * 60e3 : !Number.isNaN(scanAt) && now - scanAt > 30 * 60e3 && (Number.isNaN(doneAt) || doneAt < scanAt);
-  if (unfinished) {
+  // 每一轮开始后过了 30 分钟还没有完成记录：中途崩了或卡住了。看全部没跑完的轮次，不只最近开始的那一轮
+  const stuck = runs.started ? runs.unfinished.filter(r => now - Date.parse(r.startedAt) > 30 * 60e3) : [];
+  const legacyStuck = !runs.started && !Number.isNaN(scanAt) && now - scanAt > 30 * 60e3 && (Number.isNaN(doneAt) || doneAt < scanAt);
+  if (stuck.length || legacyStuck) {
     status = 'warn';
-    detail.push('最近一轮扫描后 30 分钟还没跑完（没有完成记录）：看巡检定时任务最近一次运行的报错');
-  } else if (runs.started && !runs.started.doneAt) detail.push(`正在跑：自 ${Math.round((now - Date.parse(runs.started.startedAt)) / 60e3)} 分钟前起`);
+    detail.push(`有 ${stuck.length || 1} 轮扫描后 30 分钟还没跑完（没有完成记录）：看巡检定时任务那几次运行的报错`);
+  }
+  for (const r of runs.unfinished.filter(x => !stuck.includes(x))) detail.push(`正在跑：自 ${Math.round((now - Date.parse(r.startedAt)) / 60e3)} 分钟前起`);
   if (open.length) {
     status = 'warn';
     detail.push(openLine);

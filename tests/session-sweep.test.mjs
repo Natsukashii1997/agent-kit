@@ -282,19 +282,73 @@ test('认领是原子的：8 个进程同一时刻认领同一次停下，只有
   assert.deepEqual(fs.readdirSync(p.claims).sort(), ['local_x@111#1', 'local_x@111#2'], '认领文件只增不删');
 });
 
-test('认领：处理途中别的轮认领不到；处理完（有了终态留痕）或 30 分钟没进展，才能再认领', () => {
+test('认领按序号认留痕：途中别的轮认领不到；failed、skipped 可以重来；30 分钟没进展且还没开始发消息才能重来', () => {
   const { p } = fake();
   const k = { p, sessionId: 'local_c', anchor: 5 };
-  const rec = (t, action) => record({ p, now: t, args: { session: 'local_c', anchor: '5', kind: 'model_limit', action } });
+  const rec = (t, action, gen) => record({ p, now: t, args: { session: 'local_c', anchor: '5', kind: 'model_limit', action, gen: String(gen) } });
   assert.equal(claim({ ...k, now: NOW }).gen, 1);
   assert.equal(claim({ ...k, now: NOW + 1000 }).claimed, false);
-  rec(NOW + 2000, 'switching');
-  rec(NOW + 3000, 'model_set');
-  assert.equal(claim({ ...k, now: NOW + 10 * 60e3 }).claimed, false, 'switching、model_set 是途中，不算处理完');
-  assert.equal(claim({ ...k, now: NOW + 34 * 60e3 }).gen, 2, '最后一次进展后 30 分钟没动静，算那一轮死掉');
-  rec(NOW + 35 * 60e3, 'failed');
-  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 + 500 }).gen, 3, '失败是终态，下一轮可以重试');
-  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 + 900 }).claimed, false, '上一个序号的失败留痕不能让刚认领的这一个也算处理完');
+  rec(NOW + 2000, 'switching', 1);
+  rec(NOW + 3000, 'model_set', 1);
+  assert.equal(claim({ ...k, now: NOW + 10 * 60e3 }).claimed, false, 'switching、model_set 是途中');
+  assert.equal(claim({ ...k, now: NOW + 34 * 60e3 }).gen, 2, '最后一次进展后 30 分钟没动静、还没开始发消息：可以重来');
+  rec(NOW + 35 * 60e3, 'failed', 2);
+  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 }).gen, 3, '失败可以重试（同一毫秒也按序号认，不靠时间）');
+  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 }).claimed, false, '上一序号的失败不能让刚认领的这一个也算处理完');
+  rec(NOW + 36 * 60e3, 'skipped', 3);
+  assert.equal(claim({ ...k, now: NOW + 36 * 60e3 }).gen, 4, '复核后没动手的可以重来');
+});
+
+test('认领：有终态就不能再认领（旧扫描结果不能把 unsure、成功的再做一遍）；发送途中断了的不自动重来、进未决清单', () => {
+  for (const terminal of ['unsure', 'continued', 'switched', 'taken']) {
+    const { p } = fake();
+    const k = { p, sessionId: 'local_t', anchor: 7 };
+    assert.equal(claim({ ...k, now: NOW }).gen, 1);
+    record({ p, now: NOW + 1000, args: { session: 'local_t', anchor: '7', kind: 'transient', action: 'sending', gen: '1' } });
+    record({ p, now: NOW + 2000, args: { session: 'local_t', anchor: '7', kind: 'transient', action: terminal, gen: '1' } });
+    const c = claim({ ...k, now: NOW + 60 * 60e3 });
+    assert.equal(c.claimed, false, terminal);
+    assert.match(c.reason, /处理完/);
+  }
+  const { p } = fake();
+  errSession(p, 'snd', 'API Error: Connection lost mid-response.', 7, { model: 'claude-opus-5-5' });
+  const k = { p, sessionId: 'local_snd', anchor: 7 };
+  claim({ ...k, now: NOW });
+  record({ p, now: NOW + 1000, args: { session: 'local_snd', anchor: '7', kind: 'transient', action: 'sending', gen: '1' } });
+  const c = claim({ ...k, now: NOW + 60 * 60e3 });
+  assert.equal(c.claimed, false);
+  assert.match(c.reason, /发消息途中断了/);
+  assert.equal(openUnsure(p, NOW + 10 * 60e3).length, 0, '30 分钟内算还在发');
+  assert.equal(openUnsure(p, NOW + 31 * 60e3).length, 1, '30 分钟后还没终态：进未决清单');
+});
+
+test('认领：旧版不带序号的留痕只认严格晚于认领时刻的（同一毫秒不算）', () => {
+  const { p } = fake();
+  const k = { p, sessionId: 'local_ms', anchor: 9 };
+  claim({ ...k, now: NOW });
+  record({ p, now: NOW, args: { session: 'local_ms', anchor: '9', kind: 'transient', action: 'failed' } });
+  assert.equal(claim({ ...k, now: NOW + 1000 }).claimed, false, '和认领同一毫秒的留痕不算到这一序号上');
+});
+
+test('命令行：claim 没抢到也退出 0，看 JSON 的 claimed', () => {
+  const { home, env } = fake();
+  const bin = path.join(import.meta.dirname, '..', 'tools', 'session-sweep.mjs');
+  const e = { ...process.env, ...env, HOME: home };
+  const run = () => spawnSync(process.execPath, [bin, 'claim', '--session', 'local_z', '--anchor', '3'], { env: e, encoding: 'utf8' });
+  const a = run();
+  const b = run();
+  assert.equal(a.status, 0);
+  assert.equal(JSON.parse(a.stdout).claimed, true);
+  assert.equal(b.status, 0);
+  assert.equal(JSON.parse(b.stdout).claimed, false);
+  assert.notEqual(spawnSync(process.execPath, [bin, 'claim', '--session', 'local_z'], { env: e, encoding: 'utf8' }).status, 0, '参数不全是命令出错');
+});
+
+test('状态只往后走：先开始、后写的那一轮不会把检查时间写回更早', () => {
+  const { p } = fake();
+  scan({ p, now: NOW + 60e3 });
+  scan({ p, now: NOW });
+  assert.equal(status({ p, now: NOW }).state.lastScanAt, new Date(NOW + 60e3).toISOString());
 });
 
 test('backlog 只读：不写检查时间、完成时间、运行记录', () => {
