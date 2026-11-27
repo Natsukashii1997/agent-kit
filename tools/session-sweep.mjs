@@ -256,7 +256,7 @@ export function claim({ p, sessionId, anchor, now = Date.now() }) {
     } catch {
       at = now;
     }
-    const after = readLog(p).filter(r => keyOf(r.sessionId, r.anchor) === key && Date.parse(r.at) >= at - 1000);
+    const after = readLog(p).filter(r => keyOf(r.sessionId, r.anchor) === key && Date.parse(r.at) >= at); // 只看这个序号认领之后的留痕：上一个序号的终态留痕不能算成这一个处理完了
     // switching、model_set 是处理途中的留痕；其余（switched、continued、failed、unsure……）说明认领的那一轮已经处理完这一项
     const ended = after.some(r => r.action !== 'switching' && r.action !== 'model_set');
     const lastMove = Math.max(at, ...after.map(r => Date.parse(r.at)));

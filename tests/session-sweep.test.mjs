@@ -293,7 +293,8 @@ test('认领：处理途中别的轮认领不到；处理完（有了终态留�
   assert.equal(claim({ ...k, now: NOW + 10 * 60e3 }).claimed, false, 'switching、model_set 是途中，不算处理完');
   assert.equal(claim({ ...k, now: NOW + 34 * 60e3 }).gen, 2, '最后一次进展后 30 分钟没动静，算那一轮死掉');
   rec(NOW + 35 * 60e3, 'failed');
-  assert.equal(claim({ ...k, now: NOW + 36 * 60e3 }).gen, 3, '失败是终态，下一轮可以重试');
+  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 + 500 }).gen, 3, '失败是终态，下一轮可以重试');
+  assert.equal(claim({ ...k, now: NOW + 35 * 60e3 + 900 }).claimed, false, '上一个序号的失败留痕不能让刚认领的这一个也算处理完');
 });
 
 test('backlog 只读：不写检查时间、完成时间、运行记录', () => {
