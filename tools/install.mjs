@@ -212,6 +212,7 @@ export function selfTest(base = KIT, node = process.execPath, python = stablePyt
   const wtFile = path.join(wt, 't.jsonl');
   fs.writeFileSync(wtFile, [
     { type: 'user', entrypoint: 'claude-desktop', message: { content: '自检' } },
+    { type: 'assistant', message: { id: 'm0', content: [{ type: 'tool_use', id: 'u0', name: 'mcp__ccd_turn__update_plan', input: {} }] } },
     { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕自检\n**下一步**：回复「合并」' }] } },
   ].map(x => JSON.stringify(x)).join('\n'));
   const w = spawnSync(node, [path.join(base, 'hooks', 'wrapup-guard.mjs')], {
@@ -328,7 +329,7 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     plan.push(`Claude Code：${file}`);
     if (!remove) plan.push(`  ${ensureOrganizeConfig(sd, home)}`, `  ${ensureHandoffConfig(sd, home)}`);
     if (remove) {
-      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 10 组 hook；你原有的同名规则不动；首轮整理、上下文提醒的配置和记录留在状态目录` : '  找不到安装记录，权限规则不动（只去掉 10 组 hook）');
+      plan.push(manifest.claude ? `  去掉安装时加的 ${(manifest.claude.deny || []).length} 条 deny、${(manifest.claude.ask || []).length} 条 ask 规则和 11 组 hook；你原有的同名规则不动；首轮整理、上下文提醒的配置和记录，wrapup-guard 的记录和 wrapup-guard.off 开关留在状态目录` : '  找不到安装记录，权限规则不动（只去掉 11 组 hook）');
       delete nextManifest.claude;
     } else {
       const n = key => nextManifest.claude[key].filter(r => !(before.permissions?.[key] || []).includes(r)).length;

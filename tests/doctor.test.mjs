@@ -143,6 +143,24 @@ test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失
   assert.equal(byName(res, 'hook 实跑自检').status, 'fail');
 });
 
+test('wrapup-guard（#150）：装好实跑通过；Stop 命令指向别处只报未装；node 路径失效实跑报失败（#151-P2-06）', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'ok');
+  const file = path.join(home, '.claude', 'settings.json');
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const original = structuredClone(s);
+  s.hooks.Stop[0].hooks[0].command = '"/usr/bin/node" "/old/repo/hooks/wrapup-guard.mjs"';
+  fs.writeFileSync(file, JSON.stringify(s));
+  const moved = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  assert.equal(byName(moved, 'Claude 权限规则').status, 'warn', '不在 runtime 副本的不算装好');
+  assert.ok(byName(moved, 'Claude 权限规则').detail.some(d => d.includes('wrapup-guard')));
+  assert.equal(byName(moved, 'wrapup-guard 实跑'), undefined);
+  original.hooks.Stop[0].hooks[0].command = original.hooks.Stop[0].hooks[0].command.replace(/^"[^"]+"/, '"/no/such/node"');
+  fs.writeFileSync(file, JSON.stringify(original));
+  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail');
+});
+
 test('思维评审三层分开计数：提醒的会话、其中调用 skill 的、其中发起接力的', () => {
   const home = fakeHome({ installed: false });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
