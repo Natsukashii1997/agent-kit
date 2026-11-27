@@ -77,8 +77,8 @@ test('各类停下的会话分别怎么处理', () => {
   configured(p);
   fs.writeFileSync(p.config, JSON.stringify({ ...JSON.parse(fs.readFileSync(p.config, 'utf8')), maxWakePerRun: 10 }));
   errSession(p, 'fable', FABLE, NOW - 600e3);
-  errSession(p, 'acctDue', "You've hit your 5-hour limit · resets 10am (Asia/Shanghai)", NOW - 5 * 36e5, { model: 'claude-opus-5-5' });
-  errSession(p, 'acctWait', "You've hit your 5-hour limit · resets 3pm (Asia/Shanghai)", NOW - 36e5, { model: 'claude-opus-5-5' });
+  errSession(p, 'acctDue', "You've hit your 5-hour limit · resets 10am", NOW - 5 * 36e5, { model: 'claude-opus-5-5' });
+  errSession(p, 'acctWait', "You've hit your 5-hour limit · resets 3pm", NOW - 36e5, { model: 'claude-opus-5-5' });
   errSession(p, 'sleep', 'API Error: Your computer went to sleep mid-response.', NOW - 30 * 60e3, { model: 'claude-opus-5-5' });
   errSession(p, 'auth', 'Failed to authenticate. API Error: 403', NOW - 30 * 60e3, { model: 'claude-opus-5-5' });
   addSession(p, 'bg', { model: 'claude-opus-5-5', rows: [say(NOW - 3 * 36e5, '**当前状态**：〔后台进行中〕等 CI')] });
