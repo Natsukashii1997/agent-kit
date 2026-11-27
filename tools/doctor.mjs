@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { inspect } from './global-instructions.mjs';
+import { latestRuns, openUnsure, paths as sweepPaths, readLog, selfUsage } from './session-sweep.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -410,6 +411,59 @@ function checkThinkingReview({ now, dir, home, env }) {
   };
 }
 
+// 会话续跑巡检（tools/session-sweep.mjs，桌面版定时任务每 15 分钟跑一次）：在不在跑、设了什么、最近 24 小时处理了什么、自己花了多少。
+// 定时任务只在桌面版开着时跑，所以超时只给 ⚠。没装（没有设置文件）只给 ·，但留痕里还有未决事项时照样报 ⚠。
+function checkSessionSweep({ now, dir, env, home }) {
+  const name = '会话续跑巡检';
+  const sdir = path.join(dir, 'session-sweep');
+  const sp = { ...sweepPaths(env, home), dir: sdir, config: path.join(sdir, 'config.json'), log: path.join(sdir, 'log.jsonl'), state: path.join(sdir, 'state.json'), claims: path.join(sdir, 'claims'), runs: path.join(sdir, 'runs') };
+  // 发消息结果不确定的是未决事项：不随时间过期，也不因为设置文件没了就不报，直到会话被人接上或常浩 resolve
+  const open = openUnsure(sp, now);
+  const openLine = `有 ${open.length} 项发消息结果不确定或发送途中断了、还没了结（没自动重发）：node tools/session-sweep.mjs status 看是哪个会话，去看一眼；处理过就 resolve`;
+  const cfgText = readText(sp.config);
+  if (cfgText == null) return open.length ? { name, status: 'warn', detail: ['没有设置文件 session-sweep/config.json，但留痕里还有未决事项', openLine] } : { name, status: 'info', detail: ['没装（状态目录里没有 session-sweep/config.json）'] };
+  const cfg = jsonOr(cfgText, null);
+  if (!cfg || typeof cfg !== 'object') return { name, status: 'warn', detail: ['设置文件 session-sweep/config.json 读不出：巡检正按默认值跑（不换模型、全部进存量）。运行 node tools/session-sweep.mjs config --backup <模型> 重写一份', ...(open.length ? [openLine] : [])] };
+  const state = jsonOr(readText(sp.state), null);
+  const runs = latestRuns(sp);
+  // 有每轮各自的运行记录（新版任务）就按它算；否则退回 state.json（旧版任务）
+  const scanAt = Date.parse(runs.started?.startedAt || state?.lastScanAt || '');
+  const doneAt = Date.parse(runs.done?.doneAt || state?.lastRunCompletedAt || '');
+  // 多久没动静：取最近一次跑完和最近一次开始里更晚的（正在跑的一轮算有动静；卡住没跑完的由下面的「没跑完」报）
+  const last = Number.isNaN(doneAt) ? scanAt : Number.isNaN(scanAt) ? doneAt : Math.max(doneAt, scanAt);
+  const mins = Math.round((now - last) / 60e3);
+  const shown = Number.isNaN(doneAt) ? scanAt : doneAt;
+  const detail = [`备用模型：${cfg.backupModel || '不设'}；上次${Number.isNaN(doneAt) ? '检查' : '跑完'}：${Number.isNaN(shown) ? '还没跑过' : `${Math.round((now - shown) / 60e3)} 分钟前`}`];
+  const rows = readLog(sp);
+  const recent = rows.filter(r => now - Date.parse(r.at) <= 864e5);
+  // 失败后下一轮重试成功的，不再算失败
+  const finished = new Set(rows.filter(r => ['switched', 'continued', 'nudged', 'taken'].includes(r.action)).map(r => `${r.sessionId}@${r.anchor}`));
+  const count = a => recent.filter(r => r.action === a && !(a === 'failed' && finished.has(`${r.sessionId}@${r.anchor}`))).length;
+  if (recent.length) detail.push(`最近 24 小时：换模型续跑 ${count('switched')}、续跑 ${count('continued')}、催核对 ${count('nudged')}、只通知 ${count('notified')}、失败 ${count('failed')}、不确定 ${count('unsure')}、排除 ${count('excluded')}（node tools/session-sweep.mjs status 看明细）`);
+  const u = selfUsage({ p: sp, now, taskId: cfg.taskId || 'quota-guard' });
+  if (u.runs) detail.push(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次，输入约 ${((u.input + u.cacheWrite + u.cacheRead) / 1e4).toFixed(0)} 万 token（缓存读 ${(u.cacheRead / 1e4).toFixed(0)} 万）`);
+  let status = 'ok';
+  if (!(mins <= 45)) {
+    status = 'warn';
+    detail.push('超过 45 分钟没检查：看桌面版是不是没开，或巡检的定时任务是否被停用、运行是否报错');
+  }
+  // 最近开始的一轮过了 30 分钟还没有完成记录：中途崩了或卡住了
+  // 每一轮开始后过了 30 分钟还没有完成记录：中途崩了或卡住了。看全部没跑完的轮次，不只最近开始的那一轮
+  const stuck = runs.started ? runs.unfinished.filter(r => now - Date.parse(r.startedAt) > 30 * 60e3) : [];
+  const legacyStuck = !runs.started && !Number.isNaN(scanAt) && now - scanAt > 30 * 60e3 && (Number.isNaN(doneAt) || doneAt < scanAt);
+  if (stuck.length || legacyStuck) {
+    status = 'warn';
+    detail.push(`有 ${stuck.length || 1} 轮扫描后 30 分钟还没跑完（没有完成记录）：看巡检定时任务那几次运行的报错`);
+  }
+  for (const r of runs.unfinished.filter(x => !stuck.includes(x))) detail.push(`正在跑：自 ${Math.round((now - Date.parse(r.startedAt)) / 60e3)} 分钟前起`);
+  if (open.length) {
+    status = 'warn';
+    detail.push(openLine);
+  }
+  if (count('failed')) status = 'warn';
+  return { name, status, detail };
+}
+
 function checkRepos({ config, run }) {
   return (config.repos || []).map(repo => {
     const name = `仓库 ${path.basename(repo)}`;
@@ -476,6 +530,7 @@ export function runDoctor(deps = {}) {
     checkPostpaneIdentity(ctx),
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
+    checkSessionSweep(ctx),
     ...checkRepos(ctx),
     checkRepoHooks(ctx),
   ];
