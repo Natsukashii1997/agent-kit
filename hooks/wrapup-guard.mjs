@@ -8,7 +8,8 @@
 //   放行：stop_hook_active（补过一次，不来回）；会话没有 wrap_up 工具（记录里看不到它的定义或对它本身的调用，
 //        例如 claude -p、Hermes 派单的 SDK 会话，即使继承了 claude-desktop 入口变量）；「下一步」指向别的会话
 //        （local_ 会话链接：按钮会把话发回本会话，第 12 节写明这种不放按钮）；本轮成功出了【交接】卡（第 5 节）。
-// 来由：近 14 天〔等你决定〕只有 53%、〔等你操作〕只有 20% 带按钮框，一条命令都没跑的轮带 wrap_up 的只有 17% 和 6%。
+// 来由：近 14 天〔等你决定〕只有约 67%、〔等你操作〕只有约 23% 带按钮框，一条命令都没跑的轮带 wrap_up 的只有约 10% 和 2%
+//   （2026-11-28 修去重后重算；原报 53%、20%、17%、6% 用的是同一个去重错误，#158）。
 // 用本机规则判断，不调模型、不外发；记录只写时间、会话、状态词、结论，不写正文。
 // 出任何错都静默放行（退出 0、不输出）。状态目录里有 wrapup-guard.off 就整个不查（卸载不删它，重装后仍生效）。
 // AGENT_KIT_NO_LOG=1 不写记录。
@@ -97,8 +98,11 @@ export function lastTurn(lines) {
       continue;
     }
     if (d.type !== 'assistant') continue;
+    // 同一次回复的每个内容块各写一行、共用 message.id、序号都是 0，不能拿它去重：
+    // 工具调用按自己的 id；其他块（和缺 id 的工具调用）按这一行的 uuid 加序号加块内容。
+    // 没有 uuid 时退回 message.id，带上块内容后，分行写的不同块不会撞键，一字不差的重写仍只算一次
     content.forEach((x, i) => {
-      const key = `${d.message?.id}|${i}|${x?.type}`;
+      const key = x?.type === 'tool_use' && x.id ? `tool|${x.id}` : `${d.uuid || d.message?.id}|${i}|${JSON.stringify(x)}`;
       if (seen.has(key)) return;
       seen.add(key);
       if (x?.type === 'tool_use') turn.tools.push({ id: x.id, name: x.name, input: x.input || {} });
