@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { compose, firstDiff, inspect, main, parsePersonal } from '../tools/global-instructions.mjs';
-import { runDoctor } from '../tools/doctor.mjs';
+import { extractSection, runDoctor } from '../tools/doctor.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const quiet = fn => {
@@ -74,4 +74,13 @@ test('不在 main 上：--apply 拒绝', () => {
   // 测试跑在 worktree 分支上时 branchProblem 非空；在 main 上跑时这条退化为只验预览
   const code = quiet(() => main(['--apply'], home, env));
   assert.ok(code === 1 || fs.existsSync(path.join(home, '.claude', 'CLAUDE.md')));
+});
+
+test('仓库版两份全局指令的「跨项目沉淀」逐字相同（#160：原来只在装机后体检里查，#153 改出一字之差没被拦住）', () => {
+  const read = rel => fs.readFileSync(path.join(KIT, rel), 'utf8');
+  const a = extractSection(read('global/claude/CLAUDE.md'), '跨项目沉淀');
+  const b = extractSection(read('global/codex/AGENTS.md'), '跨项目沉淀');
+  assert.notEqual(a, null, 'Claude 那份找不到「跨项目沉淀」一节');
+  assert.notEqual(b, null, 'Codex 那份找不到「跨项目沉淀」一节');
+  assert.equal(a, b, '两段要一字不差（README「怎么接入」）；改一份就同步改另一份');
 });

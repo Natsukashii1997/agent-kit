@@ -143,6 +143,36 @@ test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失
   assert.equal(byName(res, 'hook 实跑自检').status, 'fail');
 });
 
+test('wrapup-guard（#150）：装好实跑通过；Stop 命令指向别处只报未装；node 路径失效实跑报失败（#151-P2-06）', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'ok');
+  const file = path.join(home, '.claude', 'settings.json');
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const original = structuredClone(s);
+  s.hooks.Stop[0].hooks[0].command = '"/usr/bin/node" "/old/repo/hooks/wrapup-guard.mjs"';
+  fs.writeFileSync(file, JSON.stringify(s));
+  const moved = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  assert.equal(byName(moved, 'Claude 权限规则').status, 'warn', '不在 runtime 副本的不算装好');
+  assert.ok(byName(moved, 'Claude 权限规则').detail.some(d => d.includes('wrapup-guard')));
+  assert.equal(byName(moved, 'wrapup-guard 实跑'), undefined);
+  fs.writeFileSync(file, JSON.stringify(original));
+  fs.writeFileSync(path.join(dir, 'wrapup-guard.off'), '');
+  const off = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑');
+  assert.equal(off.status, 'warn', '真实状态目录里有关闭开关（第 2 轮 #151-P2-06）');
+  assert.ok(off.detail.some(d => d.includes('wrapup-guard.off')));
+  fs.rmSync(path.join(dir, 'wrapup-guard.off'));
+  const echo = structuredClone(original);
+  echo.hooks.Stop[0].hooks[0].command = `echo '{"decision":"block"}' # ${path.join(dir, 'runtime', 'hooks', 'wrapup-guard.mjs')}`;
+  fs.writeFileSync(file, JSON.stringify(echo));
+  const forged = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
+  assert.equal(byName(forged, 'wrapup-guard 实跑'), undefined, '脚本路径只在注释里、没被执行：不认作已装，不实跑（第 3 轮 #151-P2-06）');
+  assert.equal(byName(forged, 'Claude 权限规则').status, 'warn');
+  original.hooks.Stop[0].hooks[0].command = original.hooks.Stop[0].hooks[0].command.replace(/^"[^"]+"/, '"/no/such/node"');
+  fs.writeFileSync(file, JSON.stringify(original));
+  assert.equal(byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'wrapup-guard 实跑').status, 'fail');
+});
+
 test('思维评审三层分开计数：提醒的会话、其中调用 skill 的、其中发起接力的', () => {
   const home = fakeHome({ installed: false });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
@@ -295,4 +325,60 @@ test('会话续跑巡检：没装给 ·；按时在跑给 ✓；超时或有失�
   const broken = check();
   assert.equal(broken.status, 'warn', '设置文件读不出');
   assert.match(broken.detail[0], /读不出/);
+});
+
+test('驿窗「以我的身份发送」：只有明确读到关着才通过；开着、读不懂、空文件、字段缺失或不是布尔值都报 ⚠；没有设置文件只提示没查（#154）', () => {
+  const dirOf = home => path.join(home, 'Library', 'Application Support', 'app.postpane.mac');
+  const check = home => byName(runDoctor({ home, env: {}, dir: stateOf(home), run: realRun, config: {} }), '驿窗「以我的身份发送」');
+  const withSettings = text => {
+    const home = fakeHome();
+    fs.mkdirSync(dirOf(home), { recursive: true });
+    fs.writeFileSync(path.join(dirOf(home), 'settings.json'), text);
+    return check(home);
+  };
+
+  const none = check(fakeHome());
+  assert.equal(none.status, 'info');
+  assert.match(none.detail.join('\n'), /按开着处理/);
+
+  const on = withSettings(JSON.stringify({ settings: { agentMessages: true, agentMessagesAsUser: true } }));
+  assert.equal(on.status, 'warn');
+  assert.match(on.detail.join('\n'), /问答框/);
+
+  assert.equal(withSettings(JSON.stringify({ settings: { agentMessagesAsUser: false } })).status, 'ok');
+  assert.equal(withSettings(JSON.stringify({ agentMessagesAsUser: false })).status, 'ok');
+
+  for (const [label, text] of [
+    ['读不懂', '{ 不是 json'],
+    ['空文件', '  \n'],
+    ['字段缺失', JSON.stringify({ settings: { agentMessages: true } })],
+    ['字符串', JSON.stringify({ settings: { agentMessagesAsUser: 'false' } })],
+    ['数字', JSON.stringify({ settings: { agentMessagesAsUser: 0 } })],
+    ['null', JSON.stringify({ settings: { agentMessagesAsUser: null } })],
+    ['settings 不是对象', JSON.stringify({ settings: 'x' })],
+    ['settings 不是对象、顶层却写着关', JSON.stringify({ settings: 'x', agentMessagesAsUser: false })],
+    ['settings 是 null、顶层却写着关', JSON.stringify({ settings: null, agentMessagesAsUser: false })],
+    ['settings 是数组', JSON.stringify({ settings: [], agentMessagesAsUser: false })],
+    ['字段只在顶层、settings 里没有', JSON.stringify({ settings: {}, agentMessagesAsUser: false })],
+    ['顶层不是对象', '[]'],
+  ]) {
+    const r = withSettings(text);
+    assert.equal(r.status, 'warn', label);
+    assert.match(r.detail.join('\n'), /按开着处理/, label);
+  }
+
+  // 父目录没权限时查不了文件：不能当成「没有设置文件」
+  if (process.getuid?.() !== 0) {
+    const locked = fakeHome();
+    fs.mkdirSync(dirOf(locked), { recursive: true });
+    fs.writeFileSync(path.join(dirOf(locked), 'settings.json'), JSON.stringify({ settings: { agentMessagesAsUser: false } }));
+    fs.chmodSync(dirOf(locked), 0o000);
+    try {
+      const r = check(locked);
+      assert.equal(r.status, 'warn');
+      assert.match(r.detail.join('\n'), /EACCES/);
+    } finally {
+      fs.chmodSync(dirOf(locked), 0o755);
+    }
+  }
 });
