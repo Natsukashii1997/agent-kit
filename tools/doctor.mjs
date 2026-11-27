@@ -338,12 +338,17 @@ function checkThinkingReview({ now, dir, home, env }) {
 function checkSessionSweep({ now, dir, env, home }) {
   const name = '会话续跑巡检';
   const sdir = path.join(dir, 'session-sweep');
-  const cfg = jsonOr(readText(path.join(sdir, 'config.json')), null);
-  if (!cfg) return { name, status: 'info', detail: ['没装（状态目录里没有 session-sweep/config.json）'] };
+  const cfgText = readText(path.join(sdir, 'config.json'));
+  if (cfgText == null) return { name, status: 'info', detail: ['没装（状态目录里没有 session-sweep/config.json）'] };
+  const cfg = jsonOr(cfgText, null);
+  if (!cfg || typeof cfg !== 'object') return { name, status: 'warn', detail: ['设置文件 session-sweep/config.json 读不出：巡检正按默认值跑（不换模型、全部进存量）。运行 node tools/session-sweep.mjs config --backup <模型> 重写一份'] };
   const state = jsonOr(readText(path.join(sdir, 'state.json')), null);
-  const last = state?.lastScanAt ? Date.parse(state.lastScanAt) : NaN;
+  const scanAt = state?.lastScanAt ? Date.parse(state.lastScanAt) : NaN;
+  const doneAt = state?.lastRunCompletedAt ? Date.parse(state.lastRunCompletedAt) : NaN;
+  // 有完成记录就按完成时间算（扫描成功、处理中途崩掉的不算跑过）；旧版任务没有完成记录，退回按扫描时间
+  const last = Number.isNaN(doneAt) ? scanAt : doneAt;
   const mins = Math.round((now - last) / 60e3);
-  const detail = [`备用模型：${cfg.backupModel || '不设'}；上次检查：${state?.lastScanAt ? `${mins} 分钟前` : '还没跑过'}`];
+  const detail = [`备用模型：${cfg.backupModel || '不设'}；上次${Number.isNaN(doneAt) ? '检查' : '跑完'}：${Number.isNaN(last) ? '还没跑过' : `${mins} 分钟前`}`];
   const rows = (readText(path.join(sdir, 'log.jsonl')) || '').split('\n').flatMap(l => {
     try {
       return l ? [JSON.parse(l)] : [];
@@ -362,6 +367,10 @@ function checkSessionSweep({ now, dir, env, home }) {
   if (!(mins <= 45)) {
     status = 'warn';
     detail.push('超过 45 分钟没检查：看桌面版是不是没开，或巡检的定时任务是否被停用、运行是否报错');
+  }
+  if (!Number.isNaN(doneAt) && scanAt - doneAt > 30 * 60e3) {
+    status = 'warn';
+    detail.push('最近一轮扫描后没跑完（没有完成记录）：看巡检定时任务最近一次运行的报错');
   }
   if (count('failed')) status = 'warn';
   return { name, status, detail };

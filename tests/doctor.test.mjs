@@ -252,4 +252,14 @@ test('会话续跑巡检：没装给 ·；按时在跑给 ✓；超时或有失�
   write([]);
   fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 60 * 60e3).toISOString() }));
   assert.equal(check().status, 'warn', '超过 45 分钟');
+  fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 5 * 60e3).toISOString(), lastRunCompletedAt: new Date(now - 50 * 60e3).toISOString() }));
+  const unfinished = check();
+  assert.equal(unfinished.status, 'warn', '扫过但没跑完');
+  assert.match(unfinished.detail.join('\n'), /上次跑完：50 分钟前[\s\S]*没跑完/);
+  fs.writeFileSync(path.join(q, 'state.json'), JSON.stringify({ lastScanAt: new Date(now - 5 * 60e3).toISOString(), lastRunCompletedAt: new Date(now - 4 * 60e3).toISOString() }));
+  assert.equal(check().status, 'ok');
+  fs.writeFileSync(path.join(q, 'config.json'), '{坏了');
+  const broken = check();
+  assert.equal(broken.status, 'warn', '设置文件读不出');
+  assert.match(broken.detail[0], /读不出/);
 });

@@ -2,7 +2,9 @@
 // 会话续跑巡检：找出「停下了、没人接」的 Claude 桌面会话，交给桌面版定时任务按原因接上。
 // 本脚本只读桌面版的会话索引和会话记录、只写自己状态目录里的文件，不改任何会话；
 // 换模型、发消息由定时任务用桌面版的会话管理工具做（launchd 调不到那些工具）。
-//   node tools/session-sweep.mjs scan               找这一轮要处理的会话，输出 JSON，并记下检查时间
+//   node tools/session-sweep.mjs scan [--lease]     找这一轮要处理的会话，输出 JSON，并记下检查时间；--lease 占住本轮（上一轮没跑完就不重复处理）
+//   node tools/session-sweep.mjs check --session <id> --anchor <毫秒> [--model <模型>]   动手前复核：这个会话是否仍停在同一处、没人接
+//   node tools/session-sweep.mjs done               本轮处理完，记下完成时间、放开占用
 //   node tools/session-sweep.mjs record --session <id> --anchor <毫秒> --kind <类别> --action <动作> [--from <模型>] [--to <模型>] [--note <说明>]
 //   node tools/session-sweep.mjs backlog [--json]   巡检启用前就停着的、或超出时间窗的会话清单（只列不动，给常浩过目）
 //   node tools/session-sweep.mjs status [--json]    设置、上次检查、自身花费、最近留痕
@@ -25,6 +27,7 @@ export const DEFAULT_CONFIG = {
 const WAKE = new Set(['switch', 'continue', 'nudge']);
 const ACCOUNT_LIMITS = /^(5-hour|session|weekly|daily|monthly|usage|spend)\b/i;
 const MAX_FAILS = 2;
+const LEASE_MS = 30 * 60e3; // 一轮最长占用多久；超过就当上一轮已经死掉
 
 export function paths(env = process.env, home = os.homedir()) {
   const dir = path.join(stateDir(env, process.platform, home), 'session-sweep');
@@ -47,6 +50,11 @@ const readJson = (file, fallback) => {
 };
 
 export const loadConfig = p => ({ ...DEFAULT_CONFIG, ...readJson(p.config, {}) });
+// 设置文件三种状态：missing 没有、broken 有但读不出（此时按默认值跑，等于不换模型、全部进存量）、ok
+export function configState(file) {
+  if (!fs.existsSync(file)) return 'missing';
+  return readJson(file, undefined) && typeof readJson(file, undefined) === 'object' ? 'ok' : 'broken';
+}
 
 export function readLog(p) {
   let text = '';
@@ -137,7 +145,8 @@ const textOf = e => {
 };
 const isToolResult = e => Array.isArray(e.message?.content) && e.message.content.length > 0 && e.message.content.every(b => b?.type === 'tool_result');
 
-// 会话记录末尾最后一条「真的」消息：人说的话、助手的文字或报错（跳过工具结果、元信息）
+// 会话记录末尾最后一条「真的」消息：人说的话、助手的文字或报错（跳过工具结果、元信息）。
+// 最后一行没写完（解析不了）时返回 { uncertain: true }：可能正有新消息在写入，不能拿更早的报错当最后一条。
 export function lastEntry(file) {
   let text;
   try {
@@ -152,11 +161,14 @@ export function lastEntry(file) {
     return null;
   }
   const lines = text.split('\n');
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
   for (let i = lines.length - 1; i >= 0; i--) {
     let d;
     try {
       d = JSON.parse(lines[i]);
     } catch {
+      // 读取窗口第一行通常是被截断的半行，跳过；末尾那行读不出则说明状态不确定
+      if (i === lines.length - 1) return { uncertain: true };
       continue;
     }
     if (d.type !== 'user' && d.type !== 'assistant') continue;
@@ -169,6 +181,7 @@ export function lastEntry(file) {
 
 // 一个会话现在是不是「停下了、没人接」；是的话返回原因和锚点（停下的时刻）
 export function stoppedState(s, last) {
+  if (last?.uncertain) return null;
   if (s.error) {
     const errorAt = s.errorAt || s.errorRows?.at || 0;
     // 报错之后有人说过话（含 /model 这类命令）：已经有人接手了
@@ -182,14 +195,22 @@ export function stoppedState(s, last) {
 
 const keyOf = (sessionId, anchor) => `${sessionId}@${anchor}`;
 
-export function scan({ p, now = Date.now() }) {
+export function scan({ p, now = Date.now(), lease = false }) {
   const config = loadConfig(p);
+  const prev = readJson(p.state, {}) || {};
+  if (lease && prev.leaseUntil > now) {
+    // 上一轮还没跑完（没调 done）：这一轮不处理，免得同一个会话被叫醒两次
+    const result = { scannedAt: new Date(now).toISOString(), config, actions: [], skipped: { leased: 1 } };
+    return { ...result, backlog: [] };
+  }
   const log = readLog(p);
   const fails = {};
   const handled = new Set();
+  const modelSet = new Set(); // 已经换好模型、还没发出续跑消息的
   for (const r of log) {
     const k = keyOf(r.sessionId, r.anchor);
-    if (r.action !== 'failed') handled.add(k);
+    if (r.action === 'model_set') modelSet.add(k);
+    else if (r.action !== 'failed') handled.add(k);
     else if ((fails[k] = (fails[k] || 0) + 1) >= MAX_FAILS) handled.add(k);
   }
   // 只接一次：同一个会话 24 小时内已经因为同一类原因被叫醒过，又停在这类原因上，就不再叫醒，改为通知
@@ -203,6 +224,10 @@ export function scan({ p, now = Date.now() }) {
     if (!s?.sessionId || s.isArchived || s.scheduledTaskId) continue;
     const tr = findTranscript(p.projects, s.cliSessionId) || findTranscript(p.projects, s.lastAssistantCliSessionId);
     const last = tr ? lastEntry(tr) : null;
+    if (last?.uncertain) {
+      skip('transcriptBusy');
+      continue;
+    }
     const st = stoppedState(s, last);
     if (!st) continue;
     const item = { sessionId: s.sessionId, title: s.title || '', model: s.model, kind: st.kind, anchor: st.anchor, errorText: st.errorText, stoppedHoursAgo: Math.round((now - st.anchor) / 36e5) };
@@ -217,8 +242,15 @@ export function scan({ p, now = Date.now() }) {
     }
     let action = 'notify';
     let reason = '';
+    let modelAlreadySet = false;
     if (st.kind === 'model_limit') {
       reason = `${st.errorText.match(/hit your (.+?) limit/)?.[1] || ''} 额度用完`;
+      const key = keyOf(s.sessionId, st.anchor);
+      if (modelSet.has(key) && config.backupModel && family(s.model) === family(config.backupModel)) {
+        // 上一轮已经换好模型，但续跑消息没发出去：这一轮只补发消息，不再换模型
+        candidates.push({ ...item, action: 'switch', to: s.model, modelAlreadySet: true, reason: `${reason}；上一轮已换到 ${s.model}，补发续跑消息` });
+        continue;
+      }
       if (family(s.model) !== st.name.toLowerCase()) {
         skip('modelChanged');
         continue;
@@ -253,7 +285,7 @@ export function scan({ p, now = Date.now() }) {
       action = 'notify';
       reason += '；24 小时内已因同一原因接过一次，又停下了，不再自动接';
     }
-    candidates.push({ ...item, action, to: action === 'switch' ? config.backupModel : null, reason });
+    candidates.push({ ...item, action, to: action === 'switch' ? config.backupModel : null, modelAlreadySet, reason });
   }
   // 每轮最多叫醒 maxWakePerRun 个，最近停下的优先；其余下一轮再说
   candidates.sort((a, b) => b.anchor - a.anchor);
@@ -268,12 +300,49 @@ export function scan({ p, now = Date.now() }) {
     return true;
   });
   const result = { scannedAt: new Date(now).toISOString(), config, actions, skipped };
-  fs.mkdirSync(p.dir, { recursive: true });
-  fs.writeFileSync(p.state, `${JSON.stringify({ lastScanAt: result.scannedAt, actions: actions.length, skipped }, null, 2)}\n`);
+  const state = { ...prev, lastScanAt: result.scannedAt, actions: actions.length, skipped };
+  if (!actions.length) {
+    // 没事可做，这一轮到此就算跑完
+    state.lastRunCompletedAt = result.scannedAt;
+    delete state.leaseUntil;
+  } else if (lease) state.leaseUntil = now + LEASE_MS;
+  writeState(p, state);
   return { ...result, backlog };
 }
 
-const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded']);
+function writeState(p, state) {
+  fs.mkdirSync(p.dir, { recursive: true });
+  fs.writeFileSync(p.state, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+// 本轮处理完：记下完成时间、放开占用。体检按完成时间判断巡检是不是真的跑完了，不只是扫过
+export function done({ p, now = Date.now() }) {
+  const state = { ...(readJson(p.state, {}) || {}), lastRunCompletedAt: new Date(now).toISOString() };
+  delete state.leaseUntil;
+  writeState(p, state);
+  return state;
+}
+
+// 动手前复核：按文件现状重新判断这个会话是否仍停在同一个锚点、没人接手。
+// model：这个会话此刻应有的模型（换模型之后复核时传备用模型）；不传就不比模型。
+// 桌面版没有「带条件修改」，复核只能缩小竞态窗口，不能完全消除。
+export function check({ p, sessionId, anchor, model }) {
+  const file = listSessionFiles(p.sessions).find(f => path.basename(f) === `${sessionId}.json`);
+  const s = file ? readJson(file, null) : null;
+  if (!s) return { still: false, reason: '找不到会话索引' };
+  if (s.isArchived) return { still: false, reason: '已归档' };
+  if (model && s.model !== model) return { still: false, reason: `模型已变成 ${s.model}` };
+  const tr = findTranscript(p.projects, s.cliSessionId) || findTranscript(p.projects, s.lastAssistantCliSessionId);
+  const last = tr ? lastEntry(tr) : null;
+  if (last?.uncertain) return { still: false, reason: '会话记录正在写入' };
+  const st = stoppedState(s, last);
+  if (!st) return { still: false, reason: '已经有人接手' };
+  if (st.anchor !== Number(anchor)) return { still: false, reason: '停在了别处（锚点变了）' };
+  return { still: true, kind: st.kind };
+}
+
+// model_set：已换好模型、续跑消息还没发（不算处理完，下一轮只补发消息）
+const ACTIONS = new Set(['switched', 'continued', 'nudged', 'notified', 'failed', 'excluded', 'model_set']);
 
 export function record({ p, now = Date.now(), args }) {
   if (!args.session || !(Number(args.anchor) > 0) || !ACTIONS.has(args.action) || !args.kind) {
@@ -315,7 +384,7 @@ export function selfUsage({ p, now = Date.now(), hours = 24, taskId = loadConfig
 }
 
 export function status({ p, now = Date.now() }) {
-  return { configured: fs.existsSync(p.config), config: loadConfig(p), state: readJson(p.state, null), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
+  return { configured: fs.existsSync(p.config), configState: configState(p.config), config: loadConfig(p), state: readJson(p.state, null), usage24h: selfUsage({ p, now }), recent: readLog(p).slice(-20) };
 }
 
 export function setConfig({ p, args, now = Date.now() }) {
@@ -344,15 +413,24 @@ export function parseArgs(argv) {
 }
 
 const KIND = { model_limit: '单模型额度', account_limit: '账户额度', transient: '临时故障', needs_owner: '认证/订阅', other_error: '其他报错', background: '后台进行中' };
-const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除' };
+const SHOW = { switched: '换模型续跑', continued: '已续跑', nudged: '已催核对', notified: '只通知', failed: '失败', excluded: '排除', model_set: '已换模型待续跑' };
 
 export function main(argv = process.argv.slice(2), env = process.env) {
   const args = parseArgs(argv);
   const p = paths(env);
   const cmd = args._[0];
   if (cmd === 'scan') {
-    const { backlog, ...r } = scan({ p });
+    const { backlog, ...r } = scan({ p, lease: args.lease === true });
     console.log(JSON.stringify(r, null, 2));
+    return 0;
+  }
+  if (cmd === 'check') {
+    if (!args.session || !(Number(args.anchor) > 0)) throw new Error('check 要 --session 和 --anchor（毫秒数）');
+    console.log(JSON.stringify(check({ p, sessionId: args.session, anchor: Number(args.anchor), model: typeof args.model === 'string' ? args.model : undefined })));
+    return 0;
+  }
+  if (cmd === 'done') {
+    console.log(JSON.stringify(done({ p })));
     return 0;
   }
   if (cmd === 'backlog') {
@@ -378,7 +456,8 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     else {
       const c = s.config;
       console.log(`备用模型：${c.backupModel || '不设（单模型额度用完只通知）'}　不碰分区：${c.excludeGroupName}　启用于：${c.startAt ? new Date(c.startAt).toISOString() : '未启用'}　每轮最多叫醒 ${c.maxWakePerRun} 个`);
-      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}`);
+      if (s.configState === 'broken') console.log('⚠ 设置文件读不出，正按默认值跑（不换模型、全部进存量）：重新运行 config 写一份');
+      console.log(`上次检查：${s.state?.lastScanAt || '还没跑过'}　上次跑完：${s.state?.lastRunCompletedAt || '没有记录'}`);
       const u = s.usage24h;
       const w = n => `${(n / 1e4).toFixed(1)} 万`;
       console.log(`最近 24 小时巡检自己的花费：运行 ${u.runs} 次、调模型 ${u.calls} 次；输入 ${w(u.input + u.cacheWrite + u.cacheRead)} token（其中缓存读 ${w(u.cacheRead)}），输出 ${w(u.output)}`);
@@ -386,7 +465,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     }
     return 0;
   }
-  console.error('用法：session-sweep.mjs scan | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
+  console.error('用法：session-sweep.mjs scan [--lease] | check --session <id> --anchor <毫秒> [--model <模型>] | done | backlog [--json] | record … | status [--json] | config [--backup <模型|none>] [--start-now]');
   return 2;
 }
 

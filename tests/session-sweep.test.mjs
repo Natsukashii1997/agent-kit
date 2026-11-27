@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { classifyError, family, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
+import { check, classifyError, done, family, parseReset, paths, record, scan, setConfig, status } from '../tools/session-sweep.mjs';
 
 const NOW = new Date(2026, 10, 27, 12, 0, 0).getTime(); // 本机时区 11-27 12:00
 const START = NOW - 48 * 36e5;
@@ -128,6 +128,66 @@ test('同一次停下处理过不再处理；失败的下一轮再试，两次�
   assert.equal(scan({ p, now: NOW }).actions.length, 0);
 });
 
+test('分阶段留痕：换好模型没发出消息的，下一轮只补发消息', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'm', FABLE, at, { model: 'claude-opus-5-5' }); // 模型已经换成备用
+  assert.equal(scan({ p, now: NOW }).actions.length, 0, '没有 model_set 留痕：算常浩自己换过，跳过');
+  record({ p, now: NOW, args: { session: 'local_m', anchor: String(at), kind: 'model_limit', action: 'model_set', from: 'claude-fable-5-2', to: 'claude-opus-5-5' } });
+  const a = scan({ p, now: NOW }).actions[0];
+  assert.equal(a.action, 'switch');
+  assert.equal(a.modelAlreadySet, true);
+  assert.equal(a.to, 'claude-opus-5-5');
+  record({ p, now: NOW, args: { session: 'local_m', anchor: String(at), kind: 'model_limit', action: 'switched' } });
+  assert.equal(scan({ p, now: NOW }).actions.length, 0);
+});
+
+test('会话记录末尾半行（正在写入）：不确定，不处理', () => {
+  const { p } = fake();
+  configured(p);
+  errSession(p, 'w', FABLE, NOW - 600e3);
+  fs.appendFileSync(path.join(p.projects, '-Users-x-proj', 'cli-w.jsonl'), '{"type":"user","message":{"content":"新消息写了一半');
+  const r = scan({ p, now: NOW });
+  assert.equal(r.actions.length, 0);
+  assert.equal(r.skipped.transcriptBusy, 1);
+  assert.equal(check({ p, sessionId: 'local_w', anchor: NOW - 600e3 }).still, false);
+});
+
+test('动手前复核：仍停在原处才放行；有人接手、锚点变了、模型变了都拦下', () => {
+  const { p } = fake();
+  configured(p);
+  const at = NOW - 600e3;
+  errSession(p, 'k', FABLE, at);
+  assert.deepEqual(check({ p, sessionId: 'local_k', anchor: at }), { still: true, kind: 'model_limit' });
+  assert.equal(check({ p, sessionId: 'local_k', anchor: at, model: 'claude-fable-5-2' }).still, true);
+  assert.match(check({ p, sessionId: 'local_k', anchor: at, model: 'claude-opus-5-5' }).reason, /模型/);
+  assert.match(check({ p, sessionId: 'local_k', anchor: at - 1 }).reason, /锚点/);
+  assert.match(check({ p, sessionId: 'local_nope', anchor: at }).reason, /找不到/);
+  fs.appendFileSync(path.join(p.projects, '-Users-x-proj', 'cli-k.jsonl'), `${JSON.stringify({ type: 'user', timestamp: new Date(NOW - 60e3).toISOString(), message: { content: '我自己接着说' } })}\n`);
+  assert.match(check({ p, sessionId: 'local_k', anchor: at }).reason, /接手/);
+});
+
+test('占用：上一轮没跑完时这一轮不处理；done 或空轮记完成、放开占用', () => {
+  const { p } = fake();
+  configured(p);
+  errSession(p, 'l', 'API Error: Connection lost mid-response.', NOW - 600e3, { model: 'claude-opus-5-5' });
+  assert.equal(scan({ p, now: NOW, lease: true }).actions.length, 1);
+  const second = scan({ p, now: NOW + 60e3, lease: true });
+  assert.equal(second.actions.length, 0);
+  assert.equal(second.skipped.leased, 1);
+  assert.equal(scan({ p, now: NOW + 31 * 60e3, lease: true }).actions.length, 1, '占用超过 30 分钟算上一轮死掉');
+  const st = done({ p, now: NOW + 32 * 60e3 });
+  assert.equal(st.leaseUntil, undefined);
+  assert.equal(st.lastRunCompletedAt, new Date(NOW + 32 * 60e3).toISOString());
+  assert.equal(scan({ p, now: NOW + 33 * 60e3, lease: true }).actions.length, 1);
+  const { p: p2 } = fake();
+  scan({ p: p2, now: NOW, lease: true });
+  const s2 = status({ p: p2, now: NOW }).state;
+  assert.equal(s2.lastRunCompletedAt, new Date(NOW).toISOString(), '空轮直接算跑完');
+  assert.equal(s2.leaseUntil, undefined);
+});
+
 test('留痕、设置、状态', () => {
   const { p } = fake();
   assert.throws(() => record({ p, args: { session: 'x', anchor: '1', kind: 'transient', action: 'whatever' } }));
@@ -138,6 +198,9 @@ test('留痕、设置、状态', () => {
   assert.equal(s.recent[0].to, 'claude-opus-5-5');
   assert.equal(setConfig({ p, args: { 'start-now': true }, now: NOW }).startAt, NOW);
   assert.equal(setConfig({ p, args: { backup: 'none' } }).backupModel, null);
+  assert.equal(status({ p, now: NOW }).configState, 'ok');
+  fs.writeFileSync(p.config, '{坏了');
+  assert.equal(status({ p, now: NOW }).configState, 'broken');
 });
 
 test('巡检自己的花费：只算 24 小时内 session-sweep 的运行，同一条消息只算一次', () => {
