@@ -337,7 +337,7 @@ Claude、Hermes 同样适用（共用出处：Vault P-15）。
 各项目踩过的坑里，换个项目也成立的统一放 `/Users/nat/Documents/ChatGPT/个人/work/agent-kit/LESSONS.md`（Claude 和 Codex 共用，只此一份）。
 
 - 排障、发布、改脚本、装 launchd 或定时任务之前，先 `grep -n 关键词` 这份全局坑，再搜项目自己的 `docs/LESSONS.md`。
-- 项目里的坑判断为跨项目也成立时，提议提升为全局 G-xx（原条目保留并注明已提升）；这属于改规则文件，按「分工与沟通」先讲清、等常浩回话再写。
+- 项目里的坑判断为跨项目也成立时，提议提升为全局 G-xx（原条目保留并注明已提升）；这属于改规则文件，按「分工与沟通」先讲清、等回话再写。
 - 新项目开工、或项目还没有 AGENTS.md / LESSONS 时，建议用「项目起步」铺骨架：Claude 用 `/project-starter`，Codex 用 `$project-starter`，或直接读 `my-skills/skills/project-starter/SKILL.md`。
 - 全局坑里这几条每次都要守（正确做法见 LESSONS 对应条目）：
   - G-01 验证证据、备份放项目约定的持久目录，不放 `/tmp`。
