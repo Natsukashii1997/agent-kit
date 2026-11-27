@@ -8,6 +8,7 @@ Claude 和 Codex 跨项目共用的协作底座：各项目里换个项目也成
 
 - [LESSONS.md](LESSONS.md)：全局坑 G-xx。排障、发布、改脚本、装 launchd 或定时任务之前先 `grep`。
 - [机器执行层](docs/机器执行层.md)：把最要紧的几条规矩交给机器——不可逆操作「先问 / 直接拒绝」（权限规则 + hook）、LESSONS 按关键词自动提醒、agent-kit 自检 `tools/doctor.mjs`、每周整理输入 `tools/weekly-review.mjs`。launchd / Hermes 体检和会话复盘不在这里，归 my-skills 的 automation-checkup、session-retro。`node tools/install.mjs` 预览、加 `--apply` 装进本机 Claude Code 和 Codex。
+- [协同/](协同/routing.md)：多 Agent 协同。[审查契约](协同/审查契约.md) 是接力审核条款（工程审查、与思维评审共用的上限）的唯一语义源头；[routing.md](协同/routing.md) 回答遇到什么事用哪个模式；[agent-profile.md](协同/agent-profile.md) 和 `node tools/probe-agents.mjs` 查谁能当哪个角色、现在能不能用；[runs.jsonl](协同/runs.jsonl) 是协同运行记录。2026-11-27 从 multi-agent 并入（该仓库归档）。
 - 「项目起步」project-starter：给新项目铺两层骨架。2026-10-27 起和其他自建 skill 一起放在 [my-skills](https://github.com/Natsukashii1997/my-skills)（本机 `~/Documents/ChatGPT/个人/work/my-skills/skills/project-starter/`），`~/.agents/skills/project-starter` 是指向那里的链接，Claude 用 `/project-starter`，Codex 用 `$project-starter`。
 
 ## 分层
