@@ -31,6 +31,22 @@ test('通用规则能抓到违规样本，合规样本不误报', t => {
   assert.deepEqual(kinds(root), ['src/a.js:1 time', 'server/index.mjs:1 listen', 'server/index.mjs:1 origin', 'scripts/run.sh:2 optvar', 'package.json:3 deps']);
 });
 
+test('G-07：测试文件里临时起的服务不查 listen、origin，别的规则照查（常浩 2026-11-27 定）', t => {
+  const { root, write } = tempRoot(t);
+  const server = "await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));\n";
+  // postpane src/apps/chrome-extension/test/chromium.test.mjs、trainee-hub server/src/*.test.ts 的写法
+  write('src/apps/ext/test/chromium.test.mjs', server);
+  write('server/src/auth.test.ts', server);
+  write('server/src/views/views.spec.tsx', server);
+  write('src/__tests__/a.js', server);
+  write('server/src/tests/helper.ts', `${server}show(item.createdAt.slice(0, 16));\n`);
+  // 真入口照查；名字里带 test 但不是测试文件的也照查
+  write('server/src/index.ts', "server.listen(port, '127.0.0.1');\n");
+  write('src/latest.js', 'app.listen(port);\n');
+  write('src/contest/main.js', "app.listen(port, '127.0.0.1'); // 来源校验见 app.js\n");
+  assert.deepEqual(kinds(root), ['src/latest.js:1 listen', 'src/latest.js:1 origin', 'server/src/index.ts:1 origin', 'server/src/tests/helper.ts:2 time']);
+});
+
 test('G-08：同一文件里赋过值的变量是脚本自己的，不当可选开关报（agent-autoloop 带回）', t => {
   const { root, write } = tempRoot(t);
   // agent-autoloop scripts/install-smoke.sh 的写法：骨架 0.5.2 会把这两行都报出来

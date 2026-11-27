@@ -20,6 +20,9 @@ export const RULES = {
 const TIME = [/\b\w*(?:At|_at)\.slice\(\s*(?:0\s*,\s*1[06]|5\s*,\s*16|11\s*,\s*16)\s*\)/, /\.replace\(\s*["']T["']\s*,\s*["'] ["']\s*\)/];
 const TIME_OK = /\/[/*]\s*北京时间/;
 const LISTEN_OK = /\.listen\(\s*[\w.]+\s*,\s*['"]127\.0\.0\.1['"]/;
+// 测试文件里临时起的服务（server.listen(0, '127.0.0.1')）不是入口，G-07 的 listen、origin 两条不查（常浩 2026-11-27 定）：
+// 文件名带 .test. / .spec.，或在 test/、tests/、__tests__/ 目录下。时间显示等别的规则照查
+const TEST_FILE = /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 // 同一文件里有这些写法之一，就当做了来源校验（G-07）
 const ORIGIN_OK = /headers\s*(?:\.\s*(?:origin|host)\b|\[\s*['"](?:origin|host)['"]\s*\])|getHeader\(\s*['"](?:origin|host)['"]|来源校验见/i;
 // set -u / set -eu / set -euo pipefail 之类（G-08）
@@ -88,12 +91,13 @@ export function checkRules(root, config = readConfig(root, Object.keys(RULES)).c
   for (const file of config.scan.flatMap(dir => files(path.join(root, dir), config.exts, config.skipDirs))) {
     const src = fs.readFileSync(file, 'utf8');
     const lines = src.split('\n');
+    const isTest = TEST_FILE.test(path.relative(root, file).split(path.sep).join('/'));
     lines.forEach((text, i) => {
       if (TIME.some(r => r.test(text)) && !TIME_OK.test(text)) hit(file, i + 1, 'time', text);
-      if (text.includes('.listen(') && !LISTEN_OK.test(text)) hit(file, i + 1, 'listen', text);
+      if (!isTest && text.includes('.listen(') && !LISTEN_OK.test(text)) hit(file, i + 1, 'listen', text);
     });
     const at = lines.findIndex(text => text.includes('.listen('));
-    if (at >= 0 && !ORIGIN_OK.test(src)) hit(file, at + 1, 'origin', lines[at]);
+    if (!isTest && at >= 0 && !ORIGIN_OK.test(src)) hit(file, at + 1, 'origin', lines[at]);
   }
   for (const file of config.scanSh.flatMap(dir => files(path.join(root, dir), ['.sh'], config.skipDirs))) {
     const src = fs.readFileSync(file, 'utf8');
