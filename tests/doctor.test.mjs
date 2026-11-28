@@ -312,3 +312,60 @@ test('驿窗「以我的身份发送」：只有明确读到关着才通过；�
     }
   }
 });
+
+test('合并了没拉：主目录落后远端 main 的仓库列出来并写落后几个提交；不落后的、不是仓库的、worktree 不列（#163）', () => {
+  const home = fakeHome();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-work-'));
+  const git = (cwd, ...args) => spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' });
+  const commit = (cwd, msg) => git(cwd, '-c', 'core.hooksPath=/dev/null', 'commit', '-q', '--allow-empty', '-m', msg);
+  // 一个裸仓库当远端；本地克隆后，远端再多 n 个提交并 fetch，本地 main 就落后 n 个
+  const make = (name, behind) => {
+    const bare = path.join(work, `.${name}.git`);
+    spawnSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+    const seed = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-seed-'));
+    spawnSync('git', ['init', '-q', '-b', 'main', seed]);
+    commit(seed, '第一个');
+    git(seed, 'push', '-q', bare, 'main');
+    const r = path.join(work, name);
+    spawnSync('git', ['clone', '-q', bare, r]);
+    for (let i = 0; i < behind; i++) commit(seed, `远端新提交 ${i}`);
+    git(seed, 'push', '-q', bare, 'main');
+    git(r, 'fetch', '-q', 'origin');
+    return r;
+  };
+  const up = make('跟上了', 0);
+  make('落后两个', 2);
+  make('落后五个', 5);
+  fs.mkdirSync(path.join(work, '不是仓库'));
+  spawnSync('git', ['init', '-q', '-b', 'trunk', path.join(work, '没有main')]);
+  spawnSync('git', ['-C', up, 'worktree', 'add', '-q', path.join(work, '一个worktree'), '-b', 'wt']);
+
+  const r = byName(runDoctor({ home, env: {}, dir, run: realRun, config: { workRoot: work } }), '合并了没拉');
+  assert.equal(r.status, 'info');
+  const text = r.detail.join('\n');
+  assert.match(text, /2 个仓库的主目录落后/);
+  assert.match(text, /落后五个：落后 5 个提交[\s\S]*落后两个：落后 2 个提交/);
+  assert.doesNotMatch(text, /跟上了|不是仓库|一个worktree/);
+  assert.match(text, /查不了的仓库：[^\n]*没有main（[^）]+）/);
+
+  // 都跟上了，但还有一个查不了：不能给 ✓（#163-P2-01）
+  for (const name of ['落后两个', '落后五个']) git(path.join(work, name), 'merge', '-q', '--ff-only', 'origin/main');
+  const mixed = byName(runDoctor({ home, env: {}, dir, run: realRun, config: { workRoot: work } }), '合并了没拉');
+  assert.equal(mixed.status, 'info');
+  assert.match(mixed.detail[0], /3 个仓库的主目录都不落后/);
+  assert.match(mixed.detail.join('\n'), /查不了的仓库：[^\n]*没有main/);
+
+  // 查不了的那个去掉以后，全部查到且都不落后，才给 ✓
+  fs.rmSync(path.join(work, '没有main'), { recursive: true, force: true });
+  const ok = byName(runDoctor({ home, env: {}, dir, run: realRun, config: { workRoot: work } }), '合并了没拉');
+  assert.equal(ok.status, 'ok');
+  assert.equal(ok.detail.length, 1);
+
+  // git 超时或没有输出：归到查不了，不猜成缺分支，也不当成不落后（#163-P3-01）
+  const hung = (cmd, args, opts) => (args.includes('rev-list') ? { code: null, stdout: '', stderr: 'spawnSync git ETIMEDOUT' } : realRun(cmd, args, opts));
+  const timedOut = byName(runDoctor({ home, env: {}, dir, run: hung, config: { workRoot: work } }), '合并了没拉');
+  assert.equal(timedOut.status, 'info');
+  assert.match(timedOut.detail.join('\n'), /查不了的仓库：[^\n]*ETIMEDOUT/);
+  assert.doesNotMatch(timedOut.detail.join('\n'), /没有 main 或/);
+});

@@ -15,6 +15,7 @@
 //   node tools/weekly-review.mjs            生成并打印文件路径
 //   node tools/weekly-review.mjs --stdout   直接打印内容
 //   node tools/weekly-review.mjs --json     只打印第 3、4 节的 JSON（只读：不跑自检、不写 weekly/）
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -213,6 +214,111 @@ export function summarizePromotions(files) {
   return lines;
 }
 
+// ---- 同一处修到第三次（复盘 A1，常浩 2026-11-28 定：先只读看两周，不拦提交）----
+// 修复类提交的认法和提交检查同口径（git-hooks/commit-msg.mjs 的 checkMessage，agent-kit#133）：
+// 标题以 fix 或「修」开头（「修改」「修订」不算），或任意位置有返修、返工、回滚、热修、修复、修正、hotfix、bugfix；
+// Merge、Revert、fixup!、squash! 和写明别的类型的（feat:、docs: 等）、以 CURRENT、交接、记录、文档开头的不算。
+const FIX_WORDS = /返修|返工|回滚|热修|修复|修正|hotfix|bugfix/i;
+const NOT_FIX = /^(feat|docs|chore|test|style|ci|build|refactor|perf)(\([^)]*\))?!?:|^(CURRENT|交接|记录|文档)/i;
+export function isFixSubject(subject) {
+  const s = String(subject).trim();
+  if (!s || /^(Merge|Revert|fixup!|squash!)/.test(s)) return false;
+  return /^fix\b/i.test(s) || (/^修/.test(s) && !/^修(改|订)/.test(s)) || (!NOT_FIX.test(s) && FIX_WORDS.test(s));
+}
+
+// 只看代码：文档（.md）每次返修都跟着改，测试文件跟着被测的代码改，锁文件是生成的，都不算「同一处」。
+// 锁文件按文件名逐个列，不按「名字里带 lock」排除，免得误伤 lock.js 这类真代码。
+const LOCK_FILES = ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'Cargo.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'pdm.lock', 'Gemfile.lock', 'composer.lock', 'go.sum', 'flake.lock', 'Podfile.lock', 'Package.resolved'];
+const HOTSPOT_SKIP = new RegExp(`\\.md$|(^|/)(tests?|__tests__|fixtures)/|\\.(test|spec)\\.[a-z]+$|(^|/)(${LOCK_FILES.map(f => f.replace(/\./g, '\\.')).join('|')})$`, 'i');
+export const HOTSPOT_MIN = 3;
+const HOTSPOT_DAYS = 7;
+
+// 解析 `git log --format=%x1e%H%x1f%at%x1f%s --name-only` 的输出（%at 是作者时间，变基后不变）
+export function parseFixLog(text) {
+  return String(text)
+    .split('\x1e')
+    .filter(Boolean)
+    .map(chunk => {
+      const [head, ...rest] = chunk.split('\n');
+      const [hash, at, subject = ''] = head.split('\x1f');
+      return { hash, time: Number(at) * 1000, subject, files: rest.map(l => l.trim()).filter(Boolean) };
+    })
+    .filter(c => c.hash);
+}
+
+// 一个文件被几个修复类提交改过；还没合进 main 的分支上的返修提交也算，合并提交不算（取提交时已用 --no-merges 去掉）
+export function hotspotsOf(commits) {
+  const byFile = new Map();
+  // 同一个提交变基、挑拣后会以不同的哈希出现在几条分支上：按「作者时间 + 标题 + 改到的文件」只算一次。
+  // 带上文件，是为了同一秒、同标题但改了不同文件的两个真实提交不被并成一个。
+  const seen = new Set();
+  for (const c of commits) {
+    if (!isFixSubject(c.subject)) continue;
+    const key = `${c.time}\x1f${c.subject}\x1f${[...new Set(c.files)].sort().join('\x1f')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    for (const f of new Set(c.files)) {
+      if (HOTSPOT_SKIP.test(f)) continue;
+      const cur = byFile.get(f) || { file: f, count: 0, latest: null };
+      cur.count += 1;
+      if (!cur.latest || c.time > cur.latest.time) cur.latest = { time: c.time, subject: c.subject };
+      byFile.set(f, cur);
+    }
+  }
+  return [...byFile.values()].filter(x => x.count >= HOTSPOT_MIN);
+}
+
+// 读不了项目目录时返回 null，和「目录里没有仓库」（空数组）分开
+function gitRepos(root) {
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  return entries
+    .filter(d => d.isDirectory() && !d.name.startsWith('.') && !d.name.startsWith('_'))
+    .map(d => ({ project: d.name, dir: path.join(root, d.name) }))
+    .filter(r => fs.existsSync(path.join(r.dir, '.git')) && !isWorktree(r.dir));
+}
+
+const defaultGit = (dir, args) => {
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+  return { code: r.status, stdout: r.stdout || '' };
+};
+
+// 时间窗口严格按作者时间算（变基过来的旧提交，提交时间是新的，作者时间才是它真正写的时候）。
+// git 的 --since 系列只认提交时间，先用它粗筛会漏掉提交时间比作者时间早的提交（时钟不准、导入的历史），
+// 所以不让 git 筛时间：取各分支的全部提交，再按作者时间筛（常浩 2026-11-28 定「改成严格」，#163-P2-03）。
+// 本机 18 个仓库全历史最大的一个约 0.6 秒、35 万字节，远在 30 秒超时和 64MB 上限之内。
+
+export function summarizeHotspots(root, now, git = defaultGit) {
+  const repos = gitRepos(root);
+  if (repos === null) return [`读不了项目目录 ${root}，这一节没算。`];
+  const sinceMs = now - HOTSPOT_DAYS * 86400000;
+  const rows = [];
+  const failed = [];
+  for (const { project, dir } of repos) {
+    // --branches --remotes：只看本地和远端分支，不用 --all（--all 还带标签和别的引用，删掉的分支留下的标签也会被数进来）。
+    const r = git(dir, ['log', '--branches', '--remotes', '--no-merges', '--format=%x1e%H%x1f%at%x1f%s', '--name-only']);
+    if (r.code !== 0) {
+      failed.push(project);
+      continue;
+    }
+    const recent = parseFixLog(r.stdout).filter(c => c.time >= sinceMs && c.time <= now);
+    for (const h of hotspotsOf(recent)) rows.push({ project, ...h });
+  }
+  rows.sort((a, b) => b.count - a.count || b.latest.time - a.latest.time || a.file.localeCompare(b.file));
+  const lines = [`扫了 ${repos.length} 个仓库近 ${HOTSPOT_DAYS} 天的提交（本地和远端分支上的，按作者时间算，不含合并提交；只看代码，文档、测试、锁文件不算）。只是提示，不拦提交。`, ''];
+  if (failed.length) lines.push(`读不了提交记录、没算进来的：${failed.join('、')}。`, '');
+  if (!rows.length) lines.push(`近 ${HOTSPOT_DAYS} 天没有被修复类提交改过 ${HOTSPOT_MIN} 次以上的文件。`);
+  else {
+    lines.push(`被修复类提交改过 ${HOTSPOT_MIN} 次以上的文件共 ${rows.length} 个，列前 ${Math.min(5, rows.length)} 个。动它们之前先想：是不是该先收成一个入口、把状态列全，再修。`, '');
+    for (const x of rows.slice(0, 5)) lines.push(`- ${x.project} \`${x.file}\`：${x.count} 个修复类提交，最近一条「${x.latest.subject.slice(0, 60)}」`);
+  }
+  return lines;
+}
+
 const defaultWorkRoot = () => process.env.AGENT_KIT_WORK_ROOT || path.join(os.homedir(), 'Documents', 'ChatGPT', '个人', 'work');
 
 // 全局 LESSONS 里每条坑的标题、层级、状态
@@ -266,6 +372,8 @@ export function build({ now = Date.now(), dir = stateDir(), workRoot = defaultWo
   lines.push('## 4. 等批的提升', '', ...summarizePromotions(files), '');
 
   lines.push('## 5. 会话复盘', '', '用 my-skills 的 session-retro（my-skills#28）：纯本地、只出提案。把它的提案和上面第 2 部分对照着看：被 hook 提醒过、复盘里又出了事的坑，是升级的首选。', '');
+
+  lines.push('## 6. 同一处修到第三次', '', ...summarizeHotspots(workRoot, now), '');
   return { day, text: `${lines.join('\n')}\n` };
 }
 
