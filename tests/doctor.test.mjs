@@ -285,19 +285,25 @@ test('仓库钩子查真生效（#133）：目录不在、不能执行报 ✗，
   const ci = repo('CI仓库');
   fs.mkdirSync(path.join(ci, '.github', 'workflows'), { recursive: true });
   const wf = ref => fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), `steps:\n  - uses: actions/checkout@v4\n    with:\n      repository: Natsukashii1997/agent-kit\n      ref: ${ref}\n      path: .agent-kit\n`);
-  const withTag = (cmd, args, opts) => (args[2] === 'show' && args[3].startsWith('ak-same:') ? { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice('ak-same:'.length)), 'utf8'), stderr: '' } : realRun(cmd, args, opts));
+  const withTag = (cmd, args, opts) => (args[2] === 'show' && args[3].startsWith('git-hooks-v9:') ? { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice('git-hooks-v9:'.length)), 'utf8'), stderr: '' } : realRun(cmd, args, opts));
   const ciCheck = run => byName(runDoctor({ home, env: {}, dir, run, config: { workRoot: work, projectsFile } }), 'CI 用的共用规则检查版本');
-  wf('ak-same');
+  wf('git-hooks-v9');
   assert.equal(ciCheck(withTag).status, 'ok');
-  wf('ak-no-such-tag');
+  wf('git-hooks-v99');
   const stale = ciCheck(withTag);
   assert.equal(stale.status, 'warn');
-  assert.match(stale.detail[0], /CI仓库（\.github\/workflows\/check\.yml）用 agent-kit ak-no-such-tag：git-hooks\/check-rules\.mjs、git-hooks\/config\.mjs 和本仓库当前的不一样/);
+  assert.match(stale.detail[0], /CI仓库（\.github\/workflows\/check\.yml）用 agent-kit git-hooks-v99：git-hooks\/check-rules\.mjs、git-hooks\/config\.mjs 和本仓库当前的不一样/);
   // with: 里键的顺序随意、中间夹别的键也认；没写 ref 的报 ⚠（#141 审查）
-  fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), 'steps:\n  - uses: actions/checkout@v4\n    with:\n      ref: ak-same\n      token: x\n      repository: Natsukashii1997/agent-kit\n      path: .agent-kit\n');
+  fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), 'steps:\n  - uses: actions/checkout@v4\n    with:\n      ref: git-hooks-v9\n      token: x\n      repository: Natsukashii1997/agent-kit\n      path: .agent-kit\n');
   assert.equal(ciCheck(withTag).status, 'ok');
   fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), 'steps:\n  - uses: actions/checkout@v4\n    with:\n      repository: Natsukashii1997/agent-kit\n      path: .agent-kit\n  - run: echo\n    with:\n      ref: 别的步骤的\n');
   assert.match(ciCheck(withTag).detail.join('\n'), /检出 agent-kit 没写 ref/);
+  // 写会动的分支：内容一样也报，CI 用的版本会跟着 main 变（#141 审查 P2-08）
+  const onMain = (cmd, args, opts) => (args[2] === 'show' && args[3].startsWith('main:') ? { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice('main:'.length)), 'utf8'), stderr: '' } : realRun(cmd, args, opts));
+  wf('main');
+  const moving = ciCheck(onMain);
+  assert.equal(moving.status, 'warn');
+  assert.match(moving.detail.join('\n'), /ref「main」不是固定版本：写成 git-hooks-vN 标签或完整提交号/);
 });
 
 test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；worktree 列不出、core.hooksPath 读不出报「查不全」（#141 审查 P1-02、P2-02）', () => {
@@ -323,12 +329,15 @@ test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；
   assert.match(text, /缺commit-msg：core\.hooksPath=scripts\/hooks，目录里缺 commit-msg，修复提交不查「同类：」/);
   assert.match(text, /缺pre-push：core\.hooksPath=scripts\/hooks，目录里缺 pre-push，推送前不查规则、不跑测试/);
 
-  // 有意只装 commit-msg 的仓库（digital-twin 2026-11-20 定）：在 hooks.json 写明，缺 pre-push 不报；写错了报 ✗
-  fs.writeFileSync(path.join(work, '缺pre-push', 'scripts', 'hooks.json'), JSON.stringify({ 说明: '只装 commit-msg', hooks: ['commit-msg'] }));
-  assert.doesNotMatch(doctor(realRun).detail.join('\n'), /缺pre-push：/);
-  fs.writeFileSync(path.join(work, '缺pre-push', 'scripts', 'hooks.json'), JSON.stringify({ hooks: ['pre-commit'] }));
-  assert.match(doctor(realRun).detail.join('\n'), /缺pre-push：scripts\/hooks\.json：hooks 要是非空数组.*推送、提交会被拦下/);
+  // 有意只装 commit-msg 的只认 agent-kit 里登记的（digital-twin 2026-11-20 定）；别的仓库自己声明不算（#141 审查 P1-02）
+  repo('digital-twin', ['commit-msg']);
+  // 登记了只装 commit-msg 的仓库，残留一个没可执行位的 pre-push 也不报（#141 审查 P2-07）
+  fs.writeFileSync(path.join(work, 'digital-twin', 'scripts', 'hooks', 'pre-push'), '#!/bin/sh\n', { mode: 0o644 });
+  const withDt = doctor(realRun).detail.join('\n');
+  assert.doesNotMatch(withDt, /digital-twin：/);
+  assert.match(withDt, /缺pre-push：.*目录里缺 pre-push/);
   fs.rmSync(path.join(work, '缺pre-push'), { recursive: true, force: true });
+  fs.rmSync(path.join(work, 'digital-twin'), { recursive: true, force: true });
   fs.writeFileSync(path.join(work, '缺commit-msg', 'scripts', 'hooks', 'commit-msg'), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', 'commit-msg'), 'utf8'), { mode: 0o755 });
   assert.equal(doctor(realRun).status, 'ok', '两个都在就不报');
   // worktree list 失败：不能退回只查主检出还报 ok
@@ -341,6 +350,23 @@ test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；
   const unread = doctor(noConfig);
   assert.equal(unread.status, 'warn');
   assert.match(unread.detail.join('\n'), /缺commit-msg：读不出 core\.hooksPath（退出码 128），这处没查（查不全）/);
+
+  // 主检出已换成转发，旧 worktree 还是仓库自己的副本：从那里推送跑的是旧版，也要报（#141 审查 P2-07）
+  const genv = { ...env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const g = (r, ...args) => spawnSync('git', ['-C', r, ...args], { encoding: 'utf8', env: genv });
+  const mixed = path.join(work, '主是转发');
+  spawnSync('git', ['init', '-q', '-b', 'main', mixed], { env });
+  fs.mkdirSync(path.join(mixed, 'scripts', 'hooks'), { recursive: true });
+  for (const h of ['pre-push', 'commit-msg']) fs.writeFileSync(path.join(mixed, 'scripts', 'hooks', h), '#!/bin/sh\nnode scripts/check-rules.mjs\n', { mode: 0o755 });
+  g(mixed, 'add', '-A');
+  g(mixed, 'commit', '-q', '-m', '旧副本');
+  for (const h of ['pre-push', 'commit-msg']) fs.writeFileSync(path.join(mixed, 'scripts', 'hooks', h), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', h), 'utf8'), { mode: 0o755 });
+  g(mixed, 'commit', '-q', '-am', '换成转发');
+  g(mixed, 'config', 'core.hooksPath', 'scripts/hooks');
+  assert.equal(g(mixed, 'worktree', 'add', '-q', path.join(mixed, '.claude', 'worktrees', 'old'), '-b', 'old', 'HEAD~1').status, 0);
+  const copies = doctor(realRun);
+  assert.match(copies.detail.join('\n'), /主是转发：1 处 worktree 的钩子还是仓库自己的旧副本，从那里推送、提交跑的是旧版：\.claude\/worktrees\/old（old）/);
+  assert.doesNotMatch(copies.detail.join('\n'), /主是转发：pre-push、commit-msg 还是仓库自己的副本/, '主检出是转发，不单列');
 });
 
 test('仓库钩子：还没有仓库用转发时，运行目录缺共用实现只报 ⚠，不报 ✗（#141 审查）', () => {

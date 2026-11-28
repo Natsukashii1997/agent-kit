@@ -31,66 +31,126 @@ const SET_U = /^\s*set\s+-[a-z]*u[a-z]*\b/m;
 const OPTVAR = /\[\[?\s+-[nz]\s+"?\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))"?/g;
 const NAME = /^[A-Za-z_]\w*$/;
 
-// 脚本自己赋过值的变量（不是可选开关，G-08 不报；agent-autoloop 带回，#141 审查后收紧）：
-// 命令开头的 X=…（含 if ! X=$(…)、then / do 之后）、local / export / readonly / declare / typeset 后的每个 X=…、for X in、read 读进的变量。
-// 注释、echo 里的字符串、env X=1 cmd（只给子进程设）都不算。按引号外的 ; & | ( ) { } ! 切成一段段命令，去掉段首的
-// if / then / do / while 等关键字再认。引号里的 && ; # 不切、不当注释（#141 审查 P2-01：echo "x && DEBUG=1" 不算赋值）
-export function shellSegments(line) {
-  const segs = [];
-  let cur = '';
+// 脚本自己赋过值的变量（不是可选开关，G-08 不报；agent-autoloop 带回，#141 审查后收紧）。只认能确定落在当前 shell、
+// 而且会留下来的赋值（宁可多报，不漏报）：
+// - 一段命令全是 X=… 的（X=1、A=1 B=2、X=$(cmd)；含 if ! X=$(…)、then / do 之后）；
+// - local / export / readonly / declare / typeset 后的每个 X=…；for X in；read 读进的变量。
+// 不算：注释、引号里的字符串（echo "x && DEBUG=1"）、只给一条命令设的 X=1 cmd 和 env X=1 cmd、
+// 命令替换 $(…) 和反引号里的、子 shell ( … ) 里的、here-doc 正文（#141 审查第 1、2 轮 P2-01）。
+const KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'do', 'while', 'until']);
+const ASSIGN = /^([A-Za-z_]\w*)=/;
+
+// 一行 shell 切成一段段命令，每段是按引号切好的词。引号、$( )、反引号里的分隔符不切；子 shell ( … ) 整个跳过
+export function shellCommands(line) {
+  const cmds = [];
+  let words = [];
+  let word = '';
   let quote = '';
+  let depth = 0; // 在 $( … ) 里几层
+  const endWord = () => {
+    if (word) words.push(word);
+    word = '';
+  };
+  const endCmd = () => {
+    endWord();
+    while (words.length && KEYWORDS.has(words[0])) words.shift();
+    if (words.length) cmds.push(words);
+    words = [];
+  };
   for (let i = 0; i < line.length; i += 1) {
     const c = line[i];
     if (quote) {
       if (c === '\\' && quote === '"') {
-        cur += c + (line[i + 1] ?? '');
+        word += c + (line[i + 1] ?? '');
         i += 1;
-      } else {
-        if (c === quote) quote = '';
-        cur += c;
+        continue;
       }
+      if (c === quote) quote = '';
+      word += c;
     } else if (c === '\\') {
-      cur += c + (line[i + 1] ?? '');
+      word += c + (line[i + 1] ?? '');
       i += 1;
     } else if (c === "'" || c === '"') {
       quote = c;
-      cur += c;
-    } else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
-    else if (';&|(){}!'.includes(c)) {
-      segs.push(cur);
-      cur = '';
-    } else cur += c;
+      word += c;
+    } else if (depth) {
+      if (c === '(') depth += 1;
+      if (c === ')') depth -= 1;
+      word += c;
+    } else if (c === '$' && line[i + 1] === '(') {
+      depth = 1;
+      word += '$(';
+      i += 1;
+    } else if (c === '`') {
+      const close = line.indexOf('`', i + 1);
+      const j = close < 0 ? line.length - 1 : close;
+      word += line.slice(i, j + 1);
+      i = j;
+    } else if (c === '#' && !word) break;
+    else if (/\s/.test(c)) endWord();
+    else if (c === '(') {
+      // 子 shell：里面的赋值留不到外面，整个跳过
+      endCmd();
+      let d = 1;
+      let q = '';
+      for (i += 1; i < line.length && d; i += 1) {
+        const x = line[i];
+        if (q) {
+          if (x === q) q = '';
+        } else if (x === "'" || x === '"') q = x;
+        else if (x === '(') d += 1;
+        else if (x === ')') d -= 1;
+      }
+      i -= 1;
+    } else if (';&|{}!)'.includes(c)) endCmd();
+    else word += c;
   }
-  segs.push(cur);
-  return segs.map(t => t.trim().replace(/^(?:(?:if|then|elif|else|do|while|until)\s+)+/, '')).filter(Boolean);
+  endCmd();
+  return cmds;
 }
+
+// here-doc 的开头：<<EOF、<<-EOF、<<'EOF'、<<"EOF"（<<< 是 here-string，不算）
+const HEREDOC = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/;
 
 export function assignedNames(src) {
   const names = new Set();
-  for (const line of src.split('\n')) {
-    for (const t of shellSegments(line)) {
-      const decl = t.match(/^(?:local|export|readonly|declare|typeset)((?:\s+-\w+)*)\s+(.*)$/);
-      if (decl) for (const m of decl[2].matchAll(/(?:^|\s)([A-Za-z_]\w*)=/g)) names.add(m[1]);
-      const lead = t.match(/^([A-Za-z_]\w*)=/);
-      if (lead) names.add(lead[1]);
-      const loop = t.match(/^(?:for|select)\s+([A-Za-z_]\w*)\s+in\b/);
-      if (loop) names.add(loop[1]);
-      const read = t.match(/^(?:[A-Za-z_]\w*=\S*\s+)*read\b(.*)$/);
-      if (!read) continue;
-      const words = read[1].trim().split(/\s+/).filter(Boolean);
-      for (let i = 0; i < words.length; i++) {
-        const w = words[i];
+  const lines = src.split('\n');
+  for (let n = 0; n < lines.length; n += 1) {
+    const line = lines[n];
+    for (const words of shellCommands(line)) {
+      if (/^(?:local|export|readonly|declare|typeset)$/.test(words[0])) {
+        for (const w of words.slice(1)) if (ASSIGN.test(w)) names.add(w.match(ASSIGN)[1]);
+        continue;
+      }
+      // 全是 X=… 才是当前 shell 的赋值；X=1 cmd 只给 cmd 设
+      if (words.every(w => ASSIGN.test(w))) {
+        for (const w of words) names.add(w.match(ASSIGN)[1]);
+        continue;
+      }
+      if ((words[0] === 'for' || words[0] === 'select') && NAME.test(words[1] || '') && words[2] === 'in') names.add(words[1]);
+      let k = 0;
+      while (k < words.length && ASSIGN.test(words[k])) k += 1;
+      if (words[k] !== 'read') continue;
+      const rest = words.slice(k + 1);
+      for (let i = 0; i < rest.length; i++) {
+        const w = rest[i];
         if (w.startsWith('-')) {
           // 这几个选项后面跟一个参数；-a 的参数是数组名，也算赋值
           if (/^-[adinNptu]$/.test(w)) {
             i += 1;
-            if (w === '-a' && NAME.test(words[i] || '')) names.add(words[i]);
+            if (w === '-a' && NAME.test(rest[i] || '')) names.add(rest[i]);
           }
           continue;
         }
         if (!NAME.test(w)) break;
         names.add(w);
       }
+    }
+    // here-doc 正文是输入文本，不是命令：跳到结束标记那一行
+    const hd = line.match(HEREDOC);
+    if (hd) {
+      while (n + 1 < lines.length && lines[n + 1].trim() !== hd[3]) n += 1;
+      n += 1;
     }
   }
   return names;

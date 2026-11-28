@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { inspect } from './global-instructions.mjs';
-import { HOOK_NAMES, readConfig } from '../git-hooks/config.mjs';
+import { HOOK_NAMES } from '../git-hooks/config.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -456,6 +456,12 @@ function checkRepos({ config, run }) {
 // 名册默认 <项目目录>/digital-twin/projects.json，可用 doctor.json 的 projectsFile 覆盖。
 export const FORWARD_MARK = 'runtime/git-hooks/';
 const GIT_HOOKS = HOOK_NAMES;
+// 有意少装钩子的仓库，只认这里登记的（常浩定过才登记，改要走 agent-kit 的 PR）；不让被查的仓库自己声明（#141 审查 P1-02）。
+// 键是项目目录下主仓库的目录名，值是这个仓库要装的入口
+export const HOOK_EXCEPTIONS = {
+  // 2026-11-20 常浩定：digital-twin 只装 commit-msg，不装 pre-push（全量要好几分钟，靠 CI 和合并前跑；digital-twin docs/DECIDED.md 有登记）
+  'digital-twin': ['commit-msg'],
+};
 
 function frozenRepos(file, home) {
   const data = jsonOr(readText(file), null);
@@ -478,13 +484,13 @@ function worktrees(repo, run) {
 }
 
 // 两个入口分别查：缺 pre-push 推送前不查，缺 commit-msg 修复提交不查「同类：」，哪个缺都是 ✗（#141 审查 P1-02）。
-// 仓库在 scripts/hooks.json 的 hooks 里写明有意只装一个的（如 digital-twin 2026-11-20 定只装 commit-msg），只查写了的
+// wanted：这个仓库要装的入口，默认两个都要，HOOK_EXCEPTIONS 里登记过的按登记的；可执行位、旧副本也只看要装的（#141 审查 P2-07）
 export function inspectGitHooks(hooksDir, wanted = GIT_HOOKS) {
   const hooks = GIT_HOOKS.filter(h => fs.existsSync(path.join(hooksDir, h)));
   const missing = wanted.filter(h => !hooks.includes(h));
-  const notExec = hooks.filter(h => !(fs.statSync(path.join(hooksDir, h)).mode & 0o111));
+  const notExec = hooks.filter(h => wanted.includes(h) && !(fs.statSync(path.join(hooksDir, h)).mode & 0o111));
   const forward = hooks.filter(h => (readText(path.join(hooksDir, h)) || '').includes(FORWARD_MARK));
-  return { hooks, missing, notExec, forward, copies: hooks.filter(h => !forward.includes(h)) };
+  return { hooks, missing, notExec, forward, copies: hooks.filter(h => wanted.includes(h) && !forward.includes(h)) };
 }
 
 function checkRepoHooks({ config, env, home, run, dir }) {
@@ -513,6 +519,7 @@ function checkRepoHooks({ config, env, home, run, dir }) {
   for (const repo of repos) {
     const isFrozen = frozen.set.has(path.resolve(repo));
     const noDir = [];
+    const oldCopies = [];
     const list = worktrees(repo, run);
     if (!list) warn.push(`${path.basename(repo)}：git worktree list 跑不起来，只查了主检出，别的 worktree 没查（查不全）`);
     (list || [{ path: repo, branch: '' }]).forEach((wt, i) => {
@@ -533,20 +540,18 @@ function checkRepoHooks({ config, env, home, run, dir }) {
       const hooksDir = path.resolve(wt.path, hp);
       if (hp === '/dev/null') return warn.push(`${label}：core.hooksPath 指向 /dev/null，钩子停用了（有意停用时可忽略）`);
       if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) return noDir.push(i === 0 ? '主检出' : label.slice(path.basename(repo).length + ' 的 worktree '.length));
-      let wanted = GIT_HOOKS;
-      try {
-        wanted = readConfig(wt.path).hooks;
-      } catch (err) {
-        fail.push(`${label}：${err.message}，推送、提交会被拦下`);
-      }
-      const h = inspectGitHooks(hooksDir, wanted);
+      const h = inspectGitHooks(hooksDir, HOOK_EXCEPTIONS[path.basename(repo)] || GIT_HOOKS);
       if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 和 commit-msg，钩子不跑`);
       if (h.missing.length) fail.push(`${label}：core.hooksPath=${hp}，目录里缺 ${h.missing.join('、')}，${h.missing.includes('pre-push') ? '推送前不查规则、不跑测试' : '修复提交不查「同类：」'}`);
       if (h.notExec.length) fail.push(`${label}：${h.notExec.join('、')} 没有可执行位，git 会跳过它（chmod +x "${hooksDir}/${h.notExec[0]}"）`);
       forwarders += h.forward.length;
+      // 旧副本：主检出单列一行；别的 worktree 按仓库合成一行（从那里推送、提交跑的还是旧版，#141 审查 P2-07）
+      if (i > 0 && !isFrozen && h.copies.length) oldCopies.push(label.slice(path.basename(repo).length + ' 的 worktree '.length));
       if (i === 0 && !isFrozen && (h.copies.length || fs.existsSync(path.join(wt.path, 'scripts', 'check-rules.mjs'))))
         warn.push(`${label}：${[...h.copies, ...(fs.existsSync(path.join(wt.path, 'scripts', 'check-rules.mjs')) ? ['scripts/check-rules.mjs'] : [])].join('、')} 还是仓库自己的副本，没换成转发到 agent-kit 共用实现（#133）`);
     });
+    if (oldCopies.length)
+      warn.push(`${path.basename(repo)}：${oldCopies.length} 处 worktree 的钩子还是仓库自己的旧副本，从那里推送、提交跑的是旧版：${oldCopies.slice(0, 3).join('、')}${oldCopies.length > 3 ? ` 等 ${oldCopies.length} 处` : ''}（用完的可以清掉，还要用的先变基到 main）`);
     // 同一仓库里设了 core.hooksPath、检出里却没有那个目录的，合成一行：多是钩子进 main 之前开的旧 worktree，从那里推送、提交都不查
     if (noDir.length)
       fail.push(`${path.basename(repo)}：${noDir.length} 处检出设了 core.hooksPath，检出里却没有那个目录，钩子不跑：${noDir.slice(0, 3).join('、')}${noDir.length > 3 ? ` 等 ${noDir.length} 处` : ''}${noDir.includes('主检出') ? '' : '（都是 worktree：用完的可以清掉，还要用的先变基到 main）'}`);
@@ -570,6 +575,8 @@ function checkRepoHooks({ config, env, home, run, dir }) {
   return results;
 }
 
+export const FIXED_REF = /^(?:git-hooks-v\d+|[0-9a-f]{40})$/;
+
 // CI 上要跑规则检查的仓库检出 agent-kit 的固定标签（#133）。标签里的共用实现和本仓库当前的不一样时，本机推送前查的和 CI 查的不是同一版
 function checkCiRefs(repos, run) {
   const used = [];
@@ -592,6 +599,8 @@ function checkCiRefs(repos, run) {
     });
     if (diff.length) stale.push(`${u.repo}（${u.file}）用 agent-kit ${u.ref}：${diff.join('、')} 和本仓库当前的不一样（取不到也算）。本机推送前查的和 CI 查的不是同一版：给 agent-kit 打新标签，改这个仓库 CI 的 ref`);
   }
+  // ref 要是固定版本：git-hooks-vN 标签或完整提交号。写 main 这类会动的分支，CI 用的版本会跟着变，本机和 CI 查的哪天对不上看不出（#141 审查 P2-08）
+  for (const u of used.filter(u => u.ref && !FIXED_REF.test(u.ref))) stale.push(`${u.repo}（${u.file}）检出 agent-kit 用的 ref「${u.ref}」不是固定版本：写成 git-hooks-vN 标签或完整提交号`);
   for (const u of noRef) stale.push(`${u.repo}（${u.file}）检出 agent-kit 没写 ref：用的是默认分支的最新版，本机推送前查的和 CI 查的对不上时看不出来。写成固定标签`);
   return stale.length ? { name, status: 'warn', detail: stale } : { name, status: 'ok', detail: [`${used.map(u => `${u.repo} 用 ${u.ref}`).join('、')}，和本仓库当前的共用实现一致`] };
 }

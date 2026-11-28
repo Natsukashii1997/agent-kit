@@ -13,10 +13,13 @@ const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['
 //   （建仓库、提交、推送）会落到这个仓库上：分支多出测试的提交，主目录被改成裸仓库（G-46）。
 // - git 还把自己的 libexec/git-core 放在 PATH 最前面并设 GIT_EXEC_PATH。测试里 `command -v git` 会找到那里的 git，换了 PATH
 //   再跑它就找不到 git-upload-pack 等子命令（agent-autoloop L-07）。
+// - 不是 git 设的、但会让测试悄悄放行的：NODE_TEST_CONTEXT。在 node --test 进程里推送时它会传进钩子，
+//   钩子里的 node --test 见到它就跳过所有测试文件、退出 0，测试坏了也推得上去（#141 审查 P1-05）。
 export function cleanEnv(env, localVars, execPath) {
   const out = { ...env };
   for (const name of localVars) delete out[name];
   delete out.GIT_EXEC_PATH;
+  delete out.NODE_TEST_CONTEXT;
   if (out.PATH && execPath) out.PATH = out.PATH.split(':').filter(p => p !== execPath).join(':');
   return out;
 }

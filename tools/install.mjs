@@ -309,72 +309,96 @@ export function branchProblem(kit = KIT, git = args => spawnSync('git', ['-C', k
 // 只发生这一次，而且那时还没有仓库用转发（转发 PR 要等装好才合）；中途断了，重跑安装即可。
 // 旧版本保留最近 2 份（还在跑的钩子可能正用着），再早的删掉。并发安装由 main() 的安装锁挡住。
 export const RUNTIME_KEEP = 2;
+// 拷完整、给完可执行位的版本才放这个标记；没有标记的是拷到一半断掉的，不算一份版本（#141 审查 P2-06）
+export const RUNTIME_COMPLETE = '.complete';
 export function copyRuntime(final, kit = KIT) {
   const versions = `${final}-versions`;
   fs.mkdirSync(versions, { recursive: true });
   const id = `${stamp()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const dest = path.join(versions, id);
   fs.mkdirSync(dest);
-  const hooks = path.join(kit, 'hooks');
-  // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
-  fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.') || p === '__pycache__') });
-  fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
-  // 各仓库共用的 git 钩子（#133）：两个入口显式给可执行位，不靠复制时带过去
-  const gitHooks = path.join(kit, 'git-hooks');
-  fs.cpSync(gitHooks, path.join(dest, 'git-hooks'), { recursive: true, filter: src => !path.relative(gitHooks, src).split(path.sep).some(p => p.startsWith('.')) });
-  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.chmodSync(path.join(dest, 'git-hooks', f), 0o755);
+  try {
+    const hooks = path.join(kit, 'hooks');
+    // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
+    fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.') || p === '__pycache__') });
+    fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
+    // 各仓库共用的 git 钩子（#133）：两个入口显式给可执行位，不靠复制时带过去
+    const gitHooks = path.join(kit, 'git-hooks');
+    fs.cpSync(gitHooks, path.join(dest, 'git-hooks'), { recursive: true, filter: src => !path.relative(gitHooks, src).split(path.sep).some(p => p.startsWith('.')) });
+    for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.chmodSync(path.join(dest, 'git-hooks', f), 0o755);
+    fs.writeFileSync(path.join(dest, RUNTIME_COMPLETE), '');
+  } catch (err) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    throw err;
+  }
   // 上次被杀留下的临时链接（安装锁保证这时没有别的安装在跑）
   const dir = path.dirname(final);
   const base = path.basename(final);
   for (const f of fs.readdirSync(dir)) if (f.startsWith(`${base}.link-`)) fs.rmSync(path.join(dir, f), { force: true });
   const link = `${final}.link-${process.pid}`;
   fs.symlinkSync(path.join(path.basename(versions), id), link);
+  // 切换前 runtime 指着的那一版：一定留下（还在跑的钩子可能正用着它，也是回退用的上一版）
+  let prev = null;
   let st = null;
   try {
     st = fs.lstatSync(final);
   } catch {}
-  if (st && !st.isSymbolicLink()) fs.renameSync(final, path.join(versions, `legacy-${id}`));
+  if (st?.isSymbolicLink()) prev = path.basename(fs.readlinkSync(final));
+  else if (st) {
+    prev = `legacy-${id}`;
+    fs.renameSync(final, path.join(versions, prev));
+    fs.writeFileSync(path.join(versions, prev, RUNTIME_COMPLETE), '');
+  }
   fs.renameSync(link, final);
-  // 留下当前这份和最近 RUNTIME_KEEP 份旧的；按修改时间排（版本名以时间开头，旧装法挪进来的那份也是一份旧版本）
-  const others = fs.readdirSync(versions).filter(f => f !== id).map(f => ({ f, t: fs.statSync(path.join(versions, f)).mtimeMs })).sort((a, b) => b.t - a.t);
-  for (const { f } of others.slice(RUNTIME_KEEP)) fs.rmSync(path.join(versions, f), { recursive: true, force: true });
+  // 留下当前这份、切换前那份，再加最近的完整版本凑够 RUNTIME_KEEP 份旧的；没有完成标记的（拷到一半断掉的）删掉
+  const others = fs.readdirSync(versions).filter(f => f !== id && f !== prev);
+  const done = others.filter(f => fs.existsSync(path.join(versions, f, RUNTIME_COMPLETE)));
+  const keep = new Set(done.map(f => ({ f, t: fs.statSync(path.join(versions, f)).mtimeMs })).sort((a, b) => b.t - a.t).slice(0, RUNTIME_KEEP - (prev ? 1 : 0)).map(x => x.f));
+  for (const f of others) if (!keep.has(f)) fs.rmSync(path.join(versions, f), { recursive: true, force: true });
 }
 
-// 安装锁：同一时间只让一个安装写设置文件和运行目录（#141 审查 P1-01）。锁是状态目录下的 install.lock 目录（mkdir 是原子的），
-// 里面记着持锁进程号；那个进程已经不在了（上次被杀）就当成旧锁清掉再拿。拿不到返回持锁进程号，拿到返回 null
+// 安装锁：同一时间只让一个安装写设置文件和运行目录（#141 审查 P1-01、P1-04）。
+// - 拿锁：先在旁边建一个写好进程号和随机口令的临时目录，再一次 rename 成 install.lock。目标已存在（非空）时 rename 失败，
+//   所以锁一出现就带着完整内容，没有「建好了还没写进程号」的那一下。
+// - 不自动回收旧锁：两个安装同时判定旧锁已死、一个删完重建、另一个再删，就会两个都以为自己持锁。
+//   锁在、持锁进程已不在（上次被杀）时，拒装并说清楚，由人确认没有在装后手动删掉 install.lock。
+// - 放锁只放自己的：口令对得上才删。
+// 拿到返回口令；拿不到返回 { holder, alive }
 export function takeInstallLock(sd, pid = process.pid) {
   const lock = path.join(sd, 'install.lock');
   fs.mkdirSync(sd, { recursive: true });
-  for (let i = 0; i < 2; i += 1) {
-    try {
-      fs.mkdirSync(lock);
-      fs.writeFileSync(path.join(lock, 'pid'), String(pid));
-      return null;
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      let holder = 0;
-      try {
-        holder = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim());
-      } catch {}
-      // 刚建好锁、还没写进程号的那一下：当成有人在装
-      if (!holder) {
-        if (Date.now() - fs.statSync(lock).mtimeMs < 30000) return -1;
-      }
-      let alive = false;
-      try {
-        alive = Boolean(holder) && (process.kill(holder, 0), true);
-      } catch (e) {
-        alive = e.code === 'EPERM';
-      }
-      if (alive) return holder;
-      fs.rmSync(lock, { recursive: true, force: true });
-    }
+  const token = `${pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const tmp = `${lock}.tmp-${token}`;
+  fs.mkdirSync(tmp);
+  fs.writeFileSync(path.join(tmp, 'pid'), String(pid));
+  fs.writeFileSync(path.join(tmp, 'token'), token);
+  try {
+    fs.renameSync(tmp, lock);
+    return { token };
+  } catch (err) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw err;
   }
-  return -1;
+  let holder = 0;
+  try {
+    holder = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim());
+  } catch {}
+  let alive = false;
+  try {
+    alive = Boolean(holder) && (process.kill(holder, 0), true);
+  } catch (e) {
+    alive = e.code === 'EPERM';
+  }
+  return { holder, alive };
 }
 
-export function releaseInstallLock(sd) {
-  fs.rmSync(path.join(sd, 'install.lock'), { recursive: true, force: true });
+export function releaseInstallLock(sd, token) {
+  const lock = path.join(sd, 'install.lock');
+  let mine = false;
+  try {
+    mine = fs.readFileSync(path.join(lock, 'token'), 'utf8') === token;
+  } catch {}
+  if (mine) fs.rmSync(lock, { recursive: true, force: true });
 }
 
 // 卸载：去掉 runtime/ 里 agent-kit 的 hook 和 LESSONS，留下 git-hooks/。各仓库的转发还指着它，删了连普通提交都会被拦下（#141 审查）
@@ -402,15 +426,18 @@ export function remindChangedAt(runtime, manifest, now, kit = KIT) {
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
   if (!argv.includes('--apply')) return install(argv, home, env);
   const sd = stateDir(env, process.platform, home);
-  const holder = takeInstallLock(sd);
-  if (holder) {
-    console.error(`另一个安装正在跑${holder > 0 ? `（进程 ${holder}）` : ''}，这次什么都没改：等它跑完再装。确定没有在装、锁是残留的，删掉 ${path.join(sd, 'install.lock')} 再装`);
+  const lock = takeInstallLock(sd);
+  if (!lock.token) {
+    const where = path.join(sd, 'install.lock');
+    console.error(lock.alive
+      ? `另一个安装正在跑（进程 ${lock.holder}），这次什么都没改：等它跑完再装`
+      : `有一把安装锁 ${where}，记的进程 ${lock.holder || '（读不出）'} 已经不在，多半是上次安装中途被打断。这次什么都没改：确认没有别的安装在跑，删掉这个目录（rm -r "${where}"）再装`);
     return 1;
   }
   try {
     return install(argv, home, env);
   } finally {
-    releaseInstallLock(sd);
+    releaseInstallLock(sd, lock.token);
   }
 }
 

@@ -2,7 +2,6 @@
 // 写法（全部可省，省了就用下面的默认值）：
 // {
 //   "说明": "给人看的备注，字符串或字符串数组，程序不读",
-//   "hooks": ["commit-msg"],                    本仓库装哪些入口，默认两个都装；有意只装一个的写在这里，doctor 按它查缺没缺（#141 审查）
 //   "prePushTests": "npm test",                 推送前跑的测试命令，交给 sh -c；全量超过 3 分钟的只放快的部分
 //   "checkRules": false,                        不跑规则检查；或写成下面的对象，只写和默认值不同的项
 //   "checkRules": {
@@ -33,7 +32,6 @@ export const CONFIG_FILE = path.join('scripts', 'hooks.json');
 export const HOOK_NAMES = ['pre-push', 'commit-msg'];
 
 export const DEFAULTS = {
-  hooks: HOOK_NAMES,
   prePushTests: 'node --test tests/*.test.mjs',
   checkRules: {
     scan: ['src', 'server'],
@@ -66,13 +64,11 @@ export function readConfig(root, ruleNames = []) {
   for (const [key, value] of Object.entries(raw)) {
     if (key === NOTE) {
       if (!isNote(value)) throw bad('「说明」要是字符串或字符串数组');
-    } else if (key === 'hooks') {
-      if (!isList(value) || !value.length || value.some(h => !HOOK_NAMES.includes(h))) throw bad(`hooks 要是非空数组，只能写 ${HOOK_NAMES.join('、')}`);
     } else if (key === 'prePushTests') {
       if (typeof value !== 'string' || !value.trim()) throw bad('prePushTests 要是非空字符串（交给 sh -c 跑的命令）');
     } else if (key === 'checkRules') {
       if (value !== false && (!value || typeof value !== 'object' || Array.isArray(value))) throw bad('checkRules 要是 false 或对象');
-    } else throw bad(`不认识的键「${key}」，能写的只有 说明、hooks、prePushTests、checkRules`);
+    } else throw bad(`不认识的键「${key}」，能写的只有 说明、prePushTests、checkRules`);
   }
   let checkRules = false;
   if (raw.checkRules !== false) {
@@ -90,5 +86,5 @@ export function readConfig(root, ruleNames = []) {
     const unknown = checkRules.off.filter(name => ruleNames.length && !ruleNames.includes(name));
     if (unknown.length) throw bad(`checkRules.off 里有不认识的规则 ${unknown.join('、')}，能关的只有 ${ruleNames.join('、')}`);
   }
-  return { hooks: raw.hooks ?? DEFAULTS.hooks, prePushTests: raw.prePushTests ?? DEFAULTS.prePushTests, checkRules };
+  return { prePushTests: raw.prePushTests ?? DEFAULTS.prePushTests, checkRules };
 }

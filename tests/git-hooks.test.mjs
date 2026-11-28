@@ -63,6 +63,7 @@ test('commit-msg：返修、返工、回滚、hotfix 这类不在开头也算修
 test('pre-push 还原 git 改过的环境：去掉本仓库位置、libexec 和 GIT_EXEC_PATH，别的原样', () => {
   const env = { GIT_DIR: '/r/.git/worktrees/w', GIT_INDEX_FILE: 'x', GIT_EXEC_PATH: '/g/libexec/git-core', PATH: '/g/libexec/git-core:/opt/homebrew/bin:/usr/bin', HOME: '/h' };
   assert.deepEqual(cleanEnv(env, ['GIT_DIR', 'GIT_INDEX_FILE'], '/g/libexec/git-core'), { PATH: '/opt/homebrew/bin:/usr/bin', HOME: '/h' });
+  assert.deepEqual(cleanEnv({ NODE_TEST_CONTEXT: 'child-v8', HOME: '/h' }, [], ''), { HOME: '/h' }, 'NODE_TEST_CONTEXT 也去掉（#141 审查 P1-05）');
 });
 
 // 这份测试可能在推送前钩子里跑，git 在钩子里带着本项目仓库的位置（GIT_DIR 等）。下面的 git 一律不继承它，只动临时目录。
@@ -136,6 +137,20 @@ test('pre-push 真跑：经转发，规则检查不过就推不上去，过了�
   git('add', '-A');
   git('commit', '-q', '-m', 'feat: 测试坏了');
   assert.notEqual(git('push', '-q', 'origin', 'main').status, 0);
+});
+
+test('pre-push 真跑：推送的进程带着 NODE_TEST_CONTEXT（在 node --test 里推送），测试坏了照样推不上去（#141 审查 P1-05）', t => {
+  const { env } = tempRuntime(t);
+  const { dir, git } = tempRepo(t, { ...env, NODE_TEST_CONTEXT: 'child-v8' }, { checkRules: false });
+  writeFileSync(path.join(dir, 'tests', 'bad.test.mjs'), "import { test } from 'node:test'; test('bad', () => { throw new Error('坏了'); });\n");
+  git('add', '-A');
+  git('commit', '-q', '-m', 'feat: 测试坏了');
+  // 先确认这个变量真能让 node --test 悄悄放行，不然这条测试证明不了什么
+  const direct = spawnSync(process.execPath, ['--test', 'tests/bad.test.mjs'], { cwd: dir, encoding: 'utf8', env: { ...env, NODE_TEST_CONTEXT: 'child-v8' } });
+  assert.equal(direct.status, 0, '带着 NODE_TEST_CONTEXT 直接跑，失败的测试也退出 0');
+  const push = git('push', '-q', 'origin', 'main');
+  assert.notEqual(push.status, 0, push.stderr);
+  assert.match(push.stdout + push.stderr, /fail 1/, '钩子里的测试真跑了，而且失败了');
 });
 
 test('pre-push 真跑：hooks.json 里 checkRules 写 false 就只跑测试；hooks.json 写错了推送被拦下', t => {

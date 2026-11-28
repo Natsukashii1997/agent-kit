@@ -89,6 +89,27 @@ test('G-08：引号里的 && ; # 不切、不当注释（#141 审查 P2-01）：
   assert.deepEqual(kinds(root), ['scripts/a.sh:3 optvar', 'scripts/a.sh:5 optvar', 'scripts/a.sh:9 optvar']);
 });
 
+test('G-08：只给一条命令设的 X=1 cmd、命令替换和子 shell 里的、here-doc 正文都不算赋过值（#141 审查第 2 轮 P2-01）', t => {
+  const { root, write } = tempRoot(t);
+  write('scripts/a.sh', [
+    'set -u',
+    'DEBUG=1 true',
+    '[ -n "$DEBUG" ]',
+    'echo $(QUIET=1 true)',
+    '[ -n "$QUIET" ]',
+    "cat <<'EOF'",
+    'TRACE=1',
+    'EOF',
+    '[ -n "$TRACE" ]',
+    '( SUB=1 )',
+    '[ -n "$SUB" ]',
+    'OUT=$(date +%s) A=1',
+    '[ -n "$OUT" ] && [ -n "$A" ]',
+    'V=`date`; [ -n "$V" ]',
+  ].join('\n') + '\n');
+  assert.deepEqual(kinds(root), ['scripts/a.sh:3 optvar', 'scripts/a.sh:5 optvar', 'scripts/a.sh:9 optvar', 'scripts/a.sh:11 optvar']);
+});
+
 test('各仓库的差异写在 scripts/hooks.json：扫哪些目录、扩展名、跳过的目录、依赖白名单、关掉的规则', t => {
   const { root, write } = tempRoot(t);
   write('host/a.ts', 'show(item.createdAt.slice(0, 16));\n');
@@ -131,12 +152,9 @@ test('hooks.json 写错了直接报错，不悄悄用默认值', t => {
   assert.throws(() => readConfig(root, names), /checkRules\.scanSh 写的 bin 一个都不存在/);
   write('scripts/hooks.json', JSON.stringify({ checkRules: { scan: ['scripts', '没有'], scanSh: [] } }));
   assert.deepEqual(readConfig(root, names).checkRules.scan, ['scripts', '没有']);
-  write('scripts/hooks.json', JSON.stringify({ hooks: ['pre-commit'] }));
-  assert.throws(() => readConfig(root, names), /hooks 要是非空数组，只能写 pre-push、commit-msg/);
-  write('scripts/hooks.json', JSON.stringify({ hooks: [] }));
-  assert.throws(() => readConfig(root, names), /hooks 要是非空数组/);
+  // 少装哪个钩子不归仓库自己定（#141 审查 P1-02）
   write('scripts/hooks.json', JSON.stringify({ hooks: ['commit-msg'] }));
-  assert.deepEqual(readConfig(root, names).hooks, ['commit-msg']);
+  assert.throws(() => readConfig(root, names), /不认识的键「hooks」/);
   write('scripts/hooks.json', JSON.stringify({ checkRules: { exts: ['ts'] } }));
   assert.throws(() => readConfig(root, names), /checkRules\.exts 每项要是「\.js」这样以点开头的扩展名/);
   write('scripts/hooks.json', JSON.stringify({ 说明: '只跑快测试', prePushTests: 'npm run test:quick', checkRules: { allowedDeps: ['vite'] } }));
