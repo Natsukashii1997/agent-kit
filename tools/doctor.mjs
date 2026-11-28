@@ -120,7 +120,13 @@ function checkHooks({ home, run, env, dir }) {
   const handoffOk = cmds => cmds.some(c => c.includes(HANDOFF) && c.includes(runtimeHooks));
   const hasHandoff = handoffOk(promptCmds) && handoffOk(postCmds);
   const handoffConfig = fs.existsSync(path.join(dir, 'context-handoff', 'config.json'));
-  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig && hasHandoff && handoffConfig) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、7 个 hook 都在，首轮整理和上下文提醒的配置在状态目录`] });
+  // 收尾按钮框兜底（#150）
+  const stopCmds = (settings.hooks?.Stop || []).flatMap(g => (g.hooks || []).map(h => h.command || ''));
+  // 只认安装写进去的那种形状：「"<node>" "<runtime>/hooks/wrapup-guard.mjs"」，脚本路径要是解释器的参数，不能只出现在注释里
+  const wrapupScript = path.join(runtimeHooks, 'wrapup-guard.mjs');
+  const wrapupCmd = stopCmds.find(c => /^"[^"]+" "([^"]+)"$/.exec(c)?.[1] === wrapupScript);
+  const hasWrapup = Boolean(wrapupCmd);
+  if (!missing.length && hasGuard && hasRemind && hasSkill && hasNudge && hasPrecheck && hasOrganize && organizeConfig && hasHandoff && handoffConfig && hasWrapup) results.push({ name: 'Claude 权限规则与 hook', status: 'ok', detail: [`${cfg.deny.length} 条拒绝规则${cfg.ask.length ? `、${cfg.ask.length} 条先问规则` : ''}、8 个 hook 都在，首轮整理和上下文提醒的配置在状态目录`] });
   else
     results.push({
       name: 'Claude 权限规则与 hook',
@@ -132,6 +138,7 @@ function checkHooks({ home, run, env, dir }) {
         ...(!hasSkill ? ['没装 skill-usage（skill 调用日志）'] : []),
         ...(!hasNudge ? ['没装 thinking-review-nudge（思维评审准入提醒，改文件前和发消息时两处都要有）'] : []),
         ...(!hasPrecheck ? ['没装 bash-precheck（Bash 预检，防会话卡在没人点的安全检查批准上）'] : []),
+        ...(!hasWrapup ? ['没装 wrapup-guard（收尾按钮框兜底，Stop 钩子），或命令不是「"<node>" "<runtime 副本>/hooks/wrapup-guard.mjs"」'] : []),
         ...(!hasOrganize ? ['首轮整理钩子没装，或还指向 ~/.claude/hooks 下的旧位置（启动和发消息两处都要指向 runtime 副本）'] : []),
         ...(!organizeConfig ? ['状态目录里没有首轮整理配置 session-organize-once/config.json'] : []),
         ...(!hasHandoff ? ['上下文提醒钩子没装，或还指向 ~/.claude/hooks 下的旧位置（发消息和工具调用后两处都要指向 runtime 副本）'] : []),
@@ -178,6 +185,31 @@ function checkHooks({ home, run, env, dir }) {
     return c ? run('/bin/sh', ['-c', c], opts) : run(process.execPath, [path.join(KIT, 'hooks', file)], opts);
   };
   const g = runHook('guard-git.mjs', { tool_name: 'Bash', tool_input: { command: 'git push -f origin main' } });
+  // 收尾按钮框兜底（#150）：原样执行设置里 Stop 的那条命令，喂一份缺按钮框的假会话记录，应要求补
+  if (wrapupCmd) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-doctor-wrapup-'));
+    try {
+      const t = path.join(tmp, 't.jsonl');
+      fs.writeFileSync(t, [
+        { type: 'user', message: { content: 'doctor' } },
+        { type: 'attachment', attachment: { type: 'prompt_snapshot', tools: [{ name: 'mcp__ccd_turn__wrap_up' }] } },
+        { type: 'assistant', message: { id: 'd2', content: [{ type: 'text', text: '**当前状态**：〔等你决定〕doctor\n**下一步**：回复「合并」' }] } },
+      ].map(x => JSON.stringify(x)).join('\n'));
+      const w = run('/bin/sh', ['-c', wrapupCmd], { input: JSON.stringify({ hook_event_name: 'Stop', session_id: 'doctor', transcript_path: t }), env: { AGENT_KIT_NO_LOG: '1', AGENT_KIT_STATE_DIR: tmp } });
+      let decision = null;
+      try {
+        decision = JSON.parse(w.stdout).decision;
+      } catch {}
+      const off = fs.existsSync(path.join(dir, 'wrapup-guard.off'));
+      results.push(w.code === 0 && decision === 'block'
+        ? off
+          ? { name: 'wrapup-guard 实跑', status: 'warn', detail: ['按设置里 Stop 的命令实跑能要求补，但状态目录里有 wrapup-guard.off，实际已关闭；要打开就删掉这个文件'] }
+          : { name: 'wrapup-guard 实跑', status: 'ok', detail: ['按设置里 Stop 的命令实跑：缺按钮框的〔等你决定〕被要求补；状态目录里没有关闭开关'] }
+        : { name: 'wrapup-guard 实跑', status: 'fail', detail: [`缺按钮框的〔等你决定〕没被要求补（输出要是 decision 为 block 的 JSON）：${w.stderr || w.stdout || `退出码 ${w.code}`}`] });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
   // 推送前检查（#76）：在临时仓库里摆出 10-27 的形态，推分支应被拦下
   let leak;
   try {
@@ -260,6 +292,52 @@ function checkAutoMemory({ home }) {
     status: 'info',
     detail: [v === true ? '已开启' : '没设置，按官方默认是开启的', '它会不经批准把纠正记成笔记；要关就在 Claude 里打开 /memory 切换，留着就每周整理时看一眼 ~/.claude/projects/*/memory/'],
   };
+}
+
+// 驿窗「以我的身份发送」开着时，智能体经驿窗发的话去掉来源标签、按用户输入提交，
+// 文字上分不出是不是常浩本人（《工程流程》第 5 节「谁说的算常浩本人」）。
+// 只有明确读到 false 才给 ✓；开着、读不了、读不懂、字段缺失或不是布尔值都报 ⚠（确认不了按开着处理）。
+export const POSTPANE_SETTINGS = home => path.join(home, 'Library', 'Application Support', 'app.postpane.mac', 'settings.json');
+
+function checkPostpaneIdentity({ home }) {
+  const name = '驿窗「以我的身份发送」';
+  const file = POSTPANE_SETTINGS(home);
+  const unsure = why => ({ name, status: 'warn', detail: [`${why}，确认不了开关状态；确认前按开着处理，要常浩本人回话的事用应用内问答框`] });
+  try {
+    fs.statSync(file);
+  } catch (err) {
+    // 只有确实不存在才算「没装」；父目录没权限这类错误不能当成没有文件
+    if (err.code === 'ENOENT') return { name, status: 'info', detail: ['没有驿窗设置文件（没装驿窗或还没打开过），没查；用到驿窗转来的话之前按开着处理'] };
+    return unsure(`驿窗设置文件查不了（${err.code || err.message}）`);
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return unsure(`驿窗设置文件读不了（${err.code || err.message}）`);
+  }
+  if (!text.trim()) return unsure('驿窗设置文件是空的');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return unsure('驿窗设置文件读不懂');
+  }
+  const isObj = o => o !== null && typeof o === 'object' && !Array.isArray(o);
+  if (!isObj(parsed)) return unsure('驿窗设置文件的顶层不是对象');
+  // 有 settings 就只认 settings 里的；settings 不是对象时不退回去读顶层
+  if ('settings' in parsed && !isObj(parsed.settings)) return unsure('驿窗设置里的 settings 不是对象');
+  const holder = 'settings' in parsed ? parsed.settings : parsed;
+  const v = holder.agentMessagesAsUser;
+  if (v === false) return { name, status: 'ok', detail: ['关着（驿窗侧栏和输入框打的字算常浩本人）'] };
+  if (v === true) {
+    return {
+      name,
+      status: 'warn',
+      detail: ['开着：智能体经驿窗发的话和常浩打的字分不出来。开着期间文字只用于普通对话和合并，其余要他本人回话的事用应用内问答框', '要关：驿窗设置页里标橙色「注意」的那个开关'],
+    };
+  }
+  return unsure(`驿窗设置里的 agentMessagesAsUser 是 ${JSON.stringify(v)}（缺失或不是布尔值）`);
 }
 
 // 分开数「真正提醒」和「关键词匹配」（瘦身提案 M4）：同一会话同一条只提醒一次，匹配数会把常见词放大几十倍。
@@ -519,6 +597,54 @@ export function agentKitRefs(text) {
   return refs;
 }
 
+// 合并了没拉（复盘评审「合并了 ≠ 生效了」，#163）：项目目录下各仓库的主目录落后远端 main 几个提交。
+// 从主目录运行的仓库（skill 链接、常驻任务）落后就是合并了没生效。不联网，按上次 fetch 的远端引用算；只读，不替你拉。
+function checkMainBehind({ config, env, home, run }) {
+  const name = '合并了没拉';
+  const root = config.workRoot || env.AGENT_KIT_WORK_ROOT || path.join(home, 'Documents', 'ChatGPT', '个人', 'work');
+  const branch = config.mainBranch || 'main';
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith('.') && !e.name.startsWith('_'));
+  } catch {
+    return { name, status: 'info', detail: [`没找到项目目录 ${root}，不查`] };
+  }
+  const isMainCheckout = r => {
+    try {
+      return fs.statSync(path.join(r, '.git')).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const repos = entries.map(e => path.join(root, e.name)).filter(isMainCheckout);
+  const behind = [];
+  const unknown = [];
+  for (const r of repos) {
+    const out = run('git', ['-C', r, 'rev-list', '--count', `${branch}..origin/${branch}`]);
+    const n = Number(out.stdout.trim());
+    if (out.code === 0 && out.stdout.trim() !== '' && Number.isInteger(n)) {
+      if (n > 0) behind.push({ r, n });
+      continue;
+    }
+    // 不猜原因：有报错就带上第一行，没有就只说没拿到结果
+    const why = (out.stderr || '').trim().split('\n')[0].slice(0, 80);
+    unknown.push(`${path.basename(r)}（${why || '没拿到结果'}）`);
+  }
+  const tail = unknown.length ? [`查不了的仓库：${unknown.join('；')}`] : [];
+  // 只有纳入检查的仓库全都查到了、而且都不落后，才给 ✓；有一个查不了就只给提示
+  if (!behind.length) return { name, status: unknown.length ? 'info' : 'ok', detail: [`${repos.length - unknown.length} 个仓库的主目录都不落后远端 ${branch}（按上次 fetch 算）`, ...tail] };
+  behind.sort((a, b) => b.n - a.n);
+  return {
+    name,
+    status: 'info',
+    detail: [
+      `${behind.length} 个仓库的主目录落后远端 ${branch}（按上次 fetch 算）。从主目录运行的仓库落后，就是合并了没生效；拉不拉按《工程流程》第 5 节：`,
+      ...behind.map(({ r, n }) => `  ${path.basename(r)}：落后 ${n} 个提交`),
+      ...tail,
+    ],
+  };
+}
+
 export function runDoctor(deps = {}) {
   const env = deps.env || process.env;
   const home = deps.home || os.homedir();
@@ -535,10 +661,12 @@ export function runDoctor(deps = {}) {
     checkInstructionSync(ctx),
     ...checkGlobalInstructions(ctx),
     checkAutoMemory(ctx),
+    checkPostpaneIdentity(ctx),
     checkLessonHits(ctx),
     checkThinkingReview(ctx),
     ...checkRepos(ctx),
     ...checkRepoHooks(ctx),
+    checkMainBehind(ctx),
   ];
 }
 
