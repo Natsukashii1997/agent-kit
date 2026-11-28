@@ -457,11 +457,24 @@ function checkRepos({ config, run }) {
 export const FORWARD_MARK = 'runtime/git-hooks/';
 const GIT_HOOKS = HOOK_NAMES;
 // 有意少装钩子的仓库，只认这里登记的（常浩定过才登记，改要走 agent-kit 的 PR）；不让被查的仓库自己声明（#141 审查 P1-02）。
-// 键是项目目录下主仓库的目录名，值是这个仓库要装的入口
+// 键是仓库 origin 的「所有者/仓库名」（不分大小写），值是这个仓库要装的入口。不按目录名认：别的仓库放进同名目录拿不到例外（#141 第 3 轮审查 P1-02）
 export const HOOK_EXCEPTIONS = {
   // 2026-11-20 常浩定：digital-twin 只装 commit-msg，不装 pre-push（全量要好几分钟，靠 CI 和合并前跑；digital-twin docs/DECIDED.md 有登记）
-  'digital-twin': ['commit-msg'],
+  'natsukashii1997/digital-twin': ['commit-msg'],
 };
+
+// origin 地址 → 「所有者/仓库名」小写；https、ssh、scp 写法和结尾的 .git 都认，认不出返回 null
+export function originSlug(url) {
+  const m = String(url || '').trim().match(/github\.com[:/]+([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i);
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+}
+
+// 这个仓库要装的入口：origin 对得上登记的才按登记的，否则两个都要
+export function wantedHooks(repo, run) {
+  const out = run('git', ['-C', repo, 'remote', 'get-url', 'origin']);
+  const slug = out.code === 0 ? originSlug(out.stdout) : null;
+  return (slug && HOOK_EXCEPTIONS[slug]) || GIT_HOOKS;
+}
 
 function frozenRepos(file, home) {
   const data = jsonOr(readText(file), null);
@@ -518,6 +531,7 @@ function checkRepoHooks({ config, env, home, run, dir }) {
   });
   for (const repo of repos) {
     const isFrozen = frozen.set.has(path.resolve(repo));
+    const wanted = wantedHooks(repo, run);
     const noDir = [];
     const oldCopies = [];
     const list = worktrees(repo, run);
@@ -540,7 +554,7 @@ function checkRepoHooks({ config, env, home, run, dir }) {
       const hooksDir = path.resolve(wt.path, hp);
       if (hp === '/dev/null') return warn.push(`${label}：core.hooksPath 指向 /dev/null，钩子停用了（有意停用时可忽略）`);
       if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) return noDir.push(i === 0 ? '主检出' : label.slice(path.basename(repo).length + ' 的 worktree '.length));
-      const h = inspectGitHooks(hooksDir, HOOK_EXCEPTIONS[path.basename(repo)] || GIT_HOOKS);
+      const h = inspectGitHooks(hooksDir, wanted);
       if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 和 commit-msg，钩子不跑`);
       if (h.missing.length) fail.push(`${label}：core.hooksPath=${hp}，目录里缺 ${h.missing.join('、')}，${h.missing.includes('pre-push') ? '推送前不查规则、不跑测试' : '修复提交不查「同类：」'}`);
       if (h.notExec.length) fail.push(`${label}：${h.notExec.join('、')} 没有可执行位，git 会跳过它（chmod +x "${hooksDir}/${h.notExec[0]}"）`);
@@ -601,8 +615,24 @@ function checkCiRefs(repos, run) {
   }
   // ref 要是固定版本：git-hooks-vN 标签或完整提交号。写 main 这类会动的分支，CI 用的版本会跟着变，本机和 CI 查的哪天对不上看不出（#141 审查 P2-08）
   for (const u of used.filter(u => u.ref && !FIXED_REF.test(u.ref))) stale.push(`${u.repo}（${u.file}）检出 agent-kit 用的 ref「${u.ref}」不是固定版本：写成 git-hooks-vN 标签或完整提交号`);
+  // 标签名固定不等于标签不会动：GitHub 上的标签被删了重建，CI 检出的是新的那个，本机比的还是旧的。逐个核对远端标签指向的提交
+  // 和本机的是不是同一个；完整提交号不会变，不用核（#141 第 3 轮审查 P2-08）
+  for (const ref of [...new Set(used.map(u => u.ref).filter(r => r && /^git-hooks-v\d+$/.test(r)))]) stale.push(...checkRemoteTag(ref, run));
   for (const u of noRef) stale.push(`${u.repo}（${u.file}）检出 agent-kit 没写 ref：用的是默认分支的最新版，本机推送前查的和 CI 查的对不上时看不出来。写成固定标签`);
   return stale.length ? { name, status: 'warn', detail: stale } : { name, status: 'ok', detail: [`${used.map(u => `${u.repo} 用 ${u.ref}`).join('、')}，和本仓库当前的共用实现一致`] };
+}
+
+// 远端标签指向的提交（附注标签取它指着的提交）和本机的比；连不上、远端没有、对不上都返回一条提示，一致返回空
+function checkRemoteTag(ref, run) {
+  const remote = run('git', ['-C', KIT, 'ls-remote', 'origin', `refs/tags/${ref}`, `refs/tags/${ref}^{}`], { timeout: 30000 });
+  if (remote.code !== 0) return [`没核对 GitHub 上的标签 ${ref} 指向哪里：git ls-remote 跑不通（退出码 ${remote.code}），CI 检出的是不是本机这版不确定（查不全）`];
+  const lines = remote.stdout.split('\n').map(l => l.split('\t')).filter(x => x.length === 2);
+  const hit = lines.find(x => x[1] === `refs/tags/${ref}^{}`) || lines.find(x => x[1] === `refs/tags/${ref}`);
+  if (!hit) return [`GitHub 上没有标签 ${ref}：用它的 CI 检出会失败。推上去：git -C "${KIT}" push origin ${ref}`];
+  const local = run('git', ['-C', KIT, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const mine = local.code === 0 ? local.stdout.trim() : '';
+  if (mine === hit[0]) return [];
+  return [`GitHub 上的标签 ${ref} 指向 ${hit[0].slice(0, 7)}，本机的${mine ? `指向 ${mine.slice(0, 7)}` : '没有这个标签'}：标签被改过或本机没拉，CI 跑的和上面比的不是同一版。先 git -C "${KIT}" fetch --tags --force 再查；标签被人移动过的，改打新的 git-hooks-vN`];
 }
 
 // workflow 里检出 agent-kit 的每一步的 ref（没写 ref 的给 null）。同一步 with: 里键的顺序随意，中间夹别的键也认（#141 审查）

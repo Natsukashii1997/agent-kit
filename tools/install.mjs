@@ -358,38 +358,64 @@ export function copyRuntime(final, kit = KIT) {
 }
 
 // 安装锁：同一时间只让一个安装写设置文件和运行目录（#141 审查 P1-01、P1-04）。
-// - 拿锁：先在旁边建一个写好进程号和随机口令的临时目录，再一次 rename 成 install.lock。目标已存在（非空）时 rename 失败，
-//   所以锁一出现就带着完整内容，没有「建好了还没写进程号」的那一下。
+// - 拿锁：mkdir install.lock，目录已经在（不管空的还是有内容的）就失败，谁建成谁持锁；建成后再写进程号和随机口令
+//   （各自先写临时文件再改名，读的人看不到写了一半的）。不用 rename 换上一个写好的目录：目标是空目录时 rename 会把它替换掉，
+//   别人刚建好、还没写进程号的锁会被抢走（#141 第 3 轮审查 P1-04）。
+// - 锁里还没有口令（别人刚建好正在写，或上次写到一半被杀）：当成有人持锁，拒装。
 // - 不自动回收旧锁：两个安装同时判定旧锁已死、一个删完重建、另一个再删，就会两个都以为自己持锁。
 //   锁在、持锁进程已不在（上次被杀）时，拒装并说清楚，由人确认没有在装后手动删掉 install.lock。
 // - 放锁只放自己的：口令对得上才删。
-// 拿到返回口令；拿不到返回 { holder, alive }
+// 拿到返回口令；拿不到返回 { holder, alive, complete }（complete：锁里有没有口令）
 export function takeInstallLock(sd, pid = process.pid) {
   const lock = path.join(sd, 'install.lock');
   fs.mkdirSync(sd, { recursive: true });
-  const token = `${pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const tmp = `${lock}.tmp-${token}`;
-  fs.mkdirSync(tmp);
-  fs.writeFileSync(path.join(tmp, 'pid'), String(pid));
-  fs.writeFileSync(path.join(tmp, 'token'), token);
   try {
-    fs.renameSync(tmp, lock);
-    return { token };
+    fs.mkdirSync(lock);
   } catch (err) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    if (!['EEXIST', 'ENOTEMPTY', 'EISDIR', 'ENOTDIR'].includes(err.code)) throw err;
+    if (err.code !== 'EEXIST') throw err;
+    const read = f => {
+      try {
+        return fs.readFileSync(path.join(lock, f), 'utf8').trim();
+      } catch {
+        return '';
+      }
+    };
+    const holder = Number(read('pid')) || 0;
+    let alive = false;
+    try {
+      alive = Boolean(holder) && (process.kill(holder, 0), true);
+    } catch (e) {
+      alive = e.code === 'EPERM';
+    }
+    return { holder, alive, complete: Boolean(read('token')) };
   }
-  let holder = 0;
-  try {
-    holder = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim());
-  } catch {}
-  let alive = false;
-  try {
-    alive = Boolean(holder) && (process.kill(holder, 0), true);
-  } catch (e) {
-    alive = e.code === 'EPERM';
+  const token = `${pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  for (const [f, text] of [['pid', String(pid)], ['token', token]]) {
+    const tmp = path.join(lock, `.${f}.tmp`);
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, path.join(lock, f));
   }
-  return { holder, alive };
+  return { token };
+}
+
+// 锁加在哪：这个 home 默认的状态目录一把（设置文件在 home 下，AGENT_KIT_STATE_DIR 换了也得是同一把），
+// 状态目录被 AGENT_KIT_STATE_DIR 改到别处时那里再一把（运行目录在那里，别的 home 也可能指着它）（#141 第 3 轮审查 P1-04）
+export function installLockDirs(home, env, platform = process.platform) {
+  return [...new Set([stateDir({ ...env, AGENT_KIT_STATE_DIR: '' }, platform, home), stateDir(env, platform, home)])];
+}
+
+// 按顺序拿齐；有一把拿不到就把已拿的放掉，返回拿不到的那把在哪、谁持着
+export function takeInstallLocks(dirs, pid = process.pid) {
+  const got = [];
+  for (const dir of dirs) {
+    const r = takeInstallLock(dir, pid);
+    if (!r.token) {
+      for (const [d, t] of got) releaseInstallLock(d, t);
+      return { ...r, dir };
+    }
+    got.push([dir, r.token]);
+  }
+  return { got };
 }
 
 export function releaseInstallLock(sd, token) {
@@ -425,19 +451,20 @@ export function remindChangedAt(runtime, manifest, now, kit = KIT) {
 // --apply 时整个过程（读设置、算改动、写设置、换运行目录）都在安装锁里：先读后写之间别的安装插进来，会拿旧内容盖掉它写的
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
   if (!argv.includes('--apply')) return install(argv, home, env);
-  const sd = stateDir(env, process.platform, home);
-  const lock = takeInstallLock(sd);
-  if (!lock.token) {
-    const where = path.join(sd, 'install.lock');
+  const lock = takeInstallLocks(installLockDirs(home, env));
+  if (!lock.got) {
+    const where = path.join(lock.dir, 'install.lock');
     console.error(lock.alive
       ? `另一个安装正在跑（进程 ${lock.holder}），这次什么都没改：等它跑完再装`
-      : `有一把安装锁 ${where}，记的进程 ${lock.holder || '（读不出）'} 已经不在，多半是上次安装中途被打断。这次什么都没改：确认没有别的安装在跑，删掉这个目录（rm -r "${where}"）再装`);
+      : !lock.complete
+        ? `有一把安装锁 ${where}，里面还没写完（别的安装刚拿到锁，或上次写到一半被打断）。这次什么都没改：稍等再装；一直这样就确认没有别的安装在跑，删掉这个目录（rm -r "${where}"）再装`
+        : `有一把安装锁 ${where}，记的进程 ${lock.holder || '（读不出）'} 已经不在，多半是上次安装中途被打断。这次什么都没改：确认没有别的安装在跑，删掉这个目录（rm -r "${where}"）再装`);
     return 1;
   }
   try {
     return install(argv, home, env);
   } finally {
-    releaseInstallLock(sd, lock.token);
+    for (const [d, t] of lock.got) releaseInstallLock(d, t);
   }
 }
 

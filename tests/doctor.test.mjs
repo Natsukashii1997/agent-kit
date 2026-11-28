@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { extractSection, runDoctor } from '../tools/doctor.mjs';
+import { extractSection, originSlug, runDoctor } from '../tools/doctor.mjs';
 import { main as install } from '../tools/install.mjs';
 
 test('取一节正文：标题编号不同也能比', () => {
@@ -285,10 +285,35 @@ test('仓库钩子查真生效（#133）：目录不在、不能执行报 ✗，
   const ci = repo('CI仓库');
   fs.mkdirSync(path.join(ci, '.github', 'workflows'), { recursive: true });
   const wf = ref => fs.writeFileSync(path.join(ci, '.github', 'workflows', 'check.yml'), `steps:\n  - uses: actions/checkout@v4\n    with:\n      repository: Natsukashii1997/agent-kit\n      ref: ${ref}\n      path: .agent-kit\n`);
-  const withTag = (cmd, args, opts) => (args[2] === 'show' && args[3].startsWith('git-hooks-v9:') ? { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice('git-hooks-v9:'.length)), 'utf8'), stderr: '' } : realRun(cmd, args, opts));
+  // 远端标签：测试里不联网，ls-remote 和本机 rev-parse 都给假的；默认两边一致
+  const SHA = 'a'.repeat(40);
+  let remoteTags = { code: 0, stdout: tag => `${'b'.repeat(40)}\trefs/tags/${tag}\n${SHA}\trefs/tags/${tag}^{}\n` };
+  const withTag = (cmd, args, opts) => {
+    if (args[2] === 'show' && args[3].startsWith('git-hooks-v9:')) return { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice('git-hooks-v9:'.length)), 'utf8'), stderr: '' };
+    if (args[2] === 'ls-remote') return { code: remoteTags.code, stdout: remoteTags.code ? '' : remoteTags.stdout(args[4].slice('refs/tags/'.length)), stderr: '' };
+    if (args[2] === 'rev-parse' && /^git-hooks-v\d+\^\{commit\}$/.test(args.at(-1))) return { code: 0, stdout: `${SHA}\n`, stderr: '' };
+    return realRun(cmd, args, opts);
+  };
   const ciCheck = run => byName(runDoctor({ home, env: {}, dir, run, config: { workRoot: work, projectsFile } }), 'CI 用的共用规则检查版本');
   wf('git-hooks-v9');
   assert.equal(ciCheck(withTag).status, 'ok');
+  // GitHub 上的标签被删了重建、指向别的提交：本机比的那版不是 CI 跑的那版（#141 第 3 轮审查 P2-08）
+  remoteTags = { code: 0, stdout: tag => `${'c'.repeat(40)}\trefs/tags/${tag}\n` };
+  const moved = ciCheck(withTag);
+  assert.equal(moved.status, 'warn');
+  assert.match(moved.detail.join('\n'), /GitHub 上的标签 git-hooks-v9 指向 ccccccc，本机的指向 aaaaaaa：标签被改过或本机没拉/);
+  remoteTags = { code: 0, stdout: () => '' };
+  assert.match(ciCheck(withTag).detail.join('\n'), /GitHub 上没有标签 git-hooks-v9：用它的 CI 检出会失败/);
+  remoteTags = { code: 128, stdout: () => '' };
+  assert.match(ciCheck(withTag).detail.join('\n'), /没核对 GitHub 上的标签 git-hooks-v9 指向哪里.*查不全/);
+  remoteTags = { code: 0, stdout: tag => `${SHA}\trefs/tags/${tag}\n` };
+  assert.equal(ciCheck(withTag).status, 'ok', '轻量标签：直接比它指的提交');
+  // 完整提交号不会动，不去核远端
+  let asked = 0;
+  const countLs = (cmd, args, opts) => (args[2] === 'ls-remote' ? (asked += 1, { code: 128, stdout: '', stderr: '' }) : args[2] === 'show' && args[3].startsWith(`${SHA}:`) ? { code: 0, stdout: fs.readFileSync(path.join(KIT, args[3].slice(41)), 'utf8'), stderr: '' } : realRun(cmd, args, opts));
+  wf(SHA);
+  assert.equal(ciCheck(countLs).status, 'ok');
+  assert.equal(asked, 0);
   wf('git-hooks-v99');
   const stale = ciCheck(withTag);
   assert.equal(stale.status, 'warn');
@@ -330,12 +355,21 @@ test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；
   assert.match(text, /缺pre-push：core\.hooksPath=scripts\/hooks，目录里缺 pre-push，推送前不查规则、不跑测试/);
 
   // 有意只装 commit-msg 的只认 agent-kit 里登记的（digital-twin 2026-11-20 定）；别的仓库自己声明不算（#141 审查 P1-02）
-  repo('digital-twin', ['commit-msg']);
+  // 按 origin 认，不按目录名：目录叫 digital-twin、origin 是别的仓库（或没有 origin）照样要两个都装（#141 第 3 轮审查 P1-02）
+  const dt = repo('digital-twin', ['commit-msg']);
+  assert.match(doctor(realRun).detail.join('\n'), /digital-twin：.*目录里缺 pre-push/, '没有 origin 不给例外');
+  spawnSync('git', ['-C', dt, 'remote', 'add', 'origin', 'https://github.com/someone-else/digital-twin.git'], { env });
+  assert.match(doctor(realRun).detail.join('\n'), /digital-twin：.*目录里缺 pre-push/, 'origin 是别人的同名仓库不给例外');
+  spawnSync('git', ['-C', dt, 'remote', 'set-url', 'origin', 'git@github.com:Natsukashii1997/digital-twin.git'], { env });
   // 登记了只装 commit-msg 的仓库，残留一个没可执行位的 pre-push 也不报（#141 审查 P2-07）
   fs.writeFileSync(path.join(work, 'digital-twin', 'scripts', 'hooks', 'pre-push'), '#!/bin/sh\n', { mode: 0o644 });
   const withDt = doctor(realRun).detail.join('\n');
   assert.doesNotMatch(withDt, /digital-twin：/);
   assert.match(withDt, /缺pre-push：.*目录里缺 pre-push/);
+  // 登记的是仓库，不是目录：真 digital-twin 换个目录名也照样认
+  fs.renameSync(dt, path.join(work, '数字分身'));
+  assert.doesNotMatch(doctor(realRun).detail.join('\n'), /数字分身：/);
+  fs.renameSync(path.join(work, '数字分身'), dt);
   fs.rmSync(path.join(work, '缺pre-push'), { recursive: true, force: true });
   fs.rmSync(path.join(work, 'digital-twin'), { recursive: true, force: true });
   fs.writeFileSync(path.join(work, '缺commit-msg', 'scripts', 'hooks', 'commit-msg'), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', 'commit-msg'), 'utf8'), { mode: 0o755 });
@@ -518,4 +552,12 @@ test('合并了没拉：主目录落后远端 main 的仓库列出来并写落�
   assert.equal(timedOut.status, 'info');
   assert.match(timedOut.detail.join('\n'), /查不了的仓库：[^\n]*ETIMEDOUT/);
   assert.doesNotMatch(timedOut.detail.join('\n'), /没有 main 或/);
+});
+
+test('originSlug：https、ssh、scp 写法都认成「所有者/仓库名」小写，认不出给 null（#141 第 3 轮审查 P1-02）', () => {
+  for (const u of ['https://github.com/Natsukashii1997/digital-twin.git', 'https://github.com/Natsukashii1997/digital-twin', 'git@github.com:Natsukashii1997/digital-twin.git', 'ssh://git@github.com/Natsukashii1997/digital-twin.git\n'])
+    assert.equal(originSlug(u), 'natsukashii1997/digital-twin', u);
+  assert.equal(originSlug('https://github.com/Natsukashii1997/digital-twin-fork.git'), 'natsukashii1997/digital-twin-fork');
+  assert.equal(originSlug('/Users/x/digital-twin'), null);
+  assert.equal(originSlug(''), null);
 });

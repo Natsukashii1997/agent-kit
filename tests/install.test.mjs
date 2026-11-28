@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, RUNTIME_KEEP, releaseInstallLock, takeInstallLock, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, installLockDirs, RUNTIME_KEEP, releaseInstallLock, takeInstallLock, takeInstallLocks, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -429,8 +429,8 @@ test('安装锁（#141 审查 P1-01、P1-04）：有人在装就拒绝、什么�
   const env = { AGENT_KIT_STATE_DIR: state };
   const mine = takeInstallLock(state, process.pid);
   assert.ok(mine.token);
-  assert.deepEqual(takeInstallLock(state, process.pid), { holder: process.pid, alive: true }, '第二个拿不到');
-  assert.ok(!fs.readdirSync(state).some(f => f.includes('.tmp-')), '没拿到的临时目录清掉了');
+  assert.deepEqual(takeInstallLock(state, process.pid), { holder: process.pid, alive: true, complete: true }, '第二个拿不到');
+  assert.deepEqual(fs.readdirSync(path.join(state, 'install.lock')).sort(), ['pid', 'token'], '锁里只有进程号和口令，没有临时文件');
   let err = '';
   const log = console.error;
   console.error = m => (err += m);
@@ -450,6 +450,7 @@ test('安装锁（#141 审查 P1-01、P1-04）：有人在装就拒绝、什么�
   // 上次被杀留下的锁：不自动回收，拒装并说怎么删
   fs.mkdirSync(path.join(state, 'install.lock'));
   fs.writeFileSync(path.join(state, 'install.lock', 'pid'), '99999999');
+  fs.writeFileSync(path.join(state, 'install.lock', 'token'), '上次的口令');
   err = '';
   console.error = m => (err += m);
   try {
@@ -463,6 +464,77 @@ test('安装锁（#141 审查 P1-01、P1-04）：有人在装就拒绝、什么�
   assert.equal(quiet(() => main(['--apply', '--allow-any-branch'], home, env)), 0);
   assert.ok(fs.lstatSync(path.join(state, 'runtime')).isSymbolicLink());
   assert.ok(!fs.existsSync(path.join(state, 'install.lock')), '装完放开锁');
+});
+
+test('安装锁（#141 第 3 轮审查 P1-04）：锁目录已在就拿不到，空的、只写了一半的也一样，不会被替换；拒装并说清楚', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const lock = path.join(state, 'install.lock');
+  // 旧版安装器「先 mkdir 再写进程号」的那一下：锁目录是空的
+  fs.mkdirSync(lock, { recursive: true });
+  const before = fs.statSync(lock).ino;
+  assert.deepEqual(takeInstallLock(state), { holder: 0, alive: false, complete: false });
+  assert.equal(fs.statSync(lock).ino, before, '空锁目录原样留着，没被换掉');
+  assert.deepEqual(fs.readdirSync(lock), [], '也没往别人的锁里写东西');
+  // 只写了进程号、还没写口令（持锁进程还活着）：照样拿不到
+  fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  assert.deepEqual(takeInstallLock(state), { holder: process.pid, alive: true, complete: false });
+  fs.rmSync(path.join(lock, 'pid'));
+  let err = '';
+  const log = console.error;
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: state }), 1);
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /里面还没写完.*删掉这个目录/);
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')), '什么都没写');
+});
+
+test('安装锁的范围（#141 第 3 轮审查 P1-04）：同一个 home、AGENT_KIT_STATE_DIR 不同也是同一把锁；拿不齐时已拿的放掉', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const a = path.join(home, 'state-a');
+  const b = path.join(home, 'state-b');
+  const homeLock = path.join(home, 'Library', 'Application Support', 'agent-kit');
+  assert.deepEqual(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'), [homeLock, a]);
+  assert.deepEqual(installLockDirs(home, {}, 'darwin'), [homeLock], '没改状态目录只有一把');
+  const first = takeInstallLocks(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  assert.equal(first.got.length, 2);
+  let err = '';
+  const log = console.error;
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: b }), 1, '换个状态目录也拿不到');
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /另一个安装正在跑/);
+  assert.ok(!fs.existsSync(path.join(b, 'install.lock')), '没拿齐，状态目录那把也没留下');
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')));
+  for (const [d, t] of first.got) releaseInstallLock(d, t);
+  // 两个 home 共用一个状态目录：状态目录那把挡住
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const held = takeInstallLocks(installLockDirs(other, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  const r = takeInstallLocks(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  assert.equal(r.dir, a);
+  assert.ok(!fs.existsSync(path.join(homeLock, 'install.lock')), '先拿到的 home 那把放掉了');
+  for (const [d, t] of held.got) releaseInstallLock(d, t);
+});
+
+test('安装锁并发（#141 第 3 轮审查 P1-04）：同一个 home、20 个进程各用不同的 AGENT_KIT_STATE_DIR 同时抢，只有一个拿到', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const url = new URL('../tools/install.mjs', import.meta.url).href;
+  const code = `const m = await import(${JSON.stringify(url)}); const r = m.takeInstallLocks(m.installLockDirs(process.argv[1], { AGENT_KIT_STATE_DIR: process.argv[2] }, 'darwin')); console.log(r.got ? 'GOT' : 'NO');`;
+  const runs = Array.from({ length: 20 }, (_, i) => new Promise(resolve => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code, home, path.join(home, `state-${i}`)]);
+    let out = '';
+    c.stdout.on('data', d => (out += d));
+    c.on('exit', () => resolve(out.trim()));
+  }));
+  const results = await Promise.all(runs);
+  assert.equal(results.filter(r => r === 'GOT').length, 1, results.join(','));
+  assert.equal(results.filter(r => r === 'NO').length, 19);
 });
 
 test('安装锁并发（#141 审查 P1-04）：20 个进程同时抢一把锁，只有一个拿到', async () => {
