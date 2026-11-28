@@ -119,7 +119,7 @@ test('实跑自检含推送前检查（#76）：装的是新版就通过；装�
   const home = fakeHome();
   const dir = stateOf(home);
   const ok = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'hook 实跑自检');
-  assert.equal(ok.status, 'ok');
+  assert.equal(ok.status, 'ok', ok.detail.join('；'));
   assert.match(ok.detail[0], /带着本地 main 没推的提交推分支被拦下/);
   // 换成推送前检查之前的 guard-git（只拦强推和删除 main/master）
   const old = fs.readFileSync(path.join(dir, 'runtime', 'hooks', 'guard-git.mjs'), 'utf8').replace(/const leak = leakedCommits\([^)]*\);/g, 'const leak = null;');
@@ -128,8 +128,23 @@ test('实跑自检含推送前检查（#76）：装的是新版就通过；装�
   const res = runDoctor({ home, env: {}, dir, run: realRun, config: {} });
   assert.equal(byName(res, '已装的 hook 与仓库一致').status, 'warn');
   const stale = byName(res, 'hook 实跑自检');
-  assert.equal(stale.status, 'warn');
+  assert.equal(stale.status, 'warn', stale.detail.join('；'));
   assert.ok(stale.detail.some(d => d.includes('旧副本') && d.includes('install.mjs --apply')));
+});
+
+test('同一毫秒连跑两次体检：实跑自检都通过，不被「本会话已提醒过」吞掉 G-05（#162）', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const now = Date.now;
+  Date.now = () => 1764300000000;
+  try {
+    const a = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'hook 实跑自检');
+    const b = byName(runDoctor({ home, env: {}, dir, run: realRun, config: {} }), 'hook 实跑自检');
+    assert.equal(a.status, 'ok', a.detail.join('；'));
+    assert.equal(b.status, 'ok', b.detail.join('；'));
+  } finally {
+    Date.now = now;
+  }
 });
 
 test('设置里的 hook 命令失效（node 路径没了）：实跑自检报失败', () => {
