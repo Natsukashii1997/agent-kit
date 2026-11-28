@@ -222,8 +222,9 @@ function checkHooks({ home, run, env, dir }) {
   } catch (err) {
     leak = { code: null, stdout: '', stderr: `摆不出临时仓库：${err.message}` };
   }
-  // G-05 只在改文件时提醒（瘦身提案 S4），自检用「写一份 LaunchAgents 里的 plist」
-  const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Write', tool_input: { file_path: path.join(home, 'Library', 'LaunchAgents', 'com.agent-kit.doctor.plist'), content: '<plist/>' } }, { AGENT_KIT_NO_LOG: '1' });
+  // G-05 只在改文件时提醒（瘦身提案 S4），自检用「写一份 LaunchAgents 里的 plist」。
+  // 关掉「同一会话只提醒一次」：去重记录在状态目录里按会话号存，同一毫秒跑两次体检会撞号，第二次就收不到提醒（#162）
+  const r = runHook('lessons-remind.mjs', { session_id: `doctor-${Date.now()}`, tool_name: 'Write', tool_input: { file_path: path.join(home, 'Library', 'LaunchAgents', 'com.agent-kit.doctor.plist'), content: '<plist/>' } }, { AGENT_KIT_NO_LOG: '1', AGENT_KIT_NO_DEDUPE: '1' });
   const p = runHook('bash-precheck.mjs', { tool_name: 'Bash', tool_input: { command: 'cd /x && rm -f "$O"/*.zip' } }, { AGENT_KIT_NO_LOG: '1' });
   const okG = g.code === 0 && g.stdout.includes('"deny"');
   const okL = leak.code === 0 && leak.stdout.includes('"deny"') && leak.stdout.includes('origin/main');
