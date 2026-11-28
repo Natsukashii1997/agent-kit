@@ -323,6 +323,11 @@ test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；
   assert.match(text, /缺commit-msg：core\.hooksPath=scripts\/hooks，目录里缺 commit-msg，修复提交不查「同类：」/);
   assert.match(text, /缺pre-push：core\.hooksPath=scripts\/hooks，目录里缺 pre-push，推送前不查规则、不跑测试/);
 
+  // 有意只装 commit-msg 的仓库（digital-twin 2026-11-20 定）：在 hooks.json 写明，缺 pre-push 不报；写错了报 ✗
+  fs.writeFileSync(path.join(work, '缺pre-push', 'scripts', 'hooks.json'), JSON.stringify({ 说明: '只装 commit-msg', hooks: ['commit-msg'] }));
+  assert.doesNotMatch(doctor(realRun).detail.join('\n'), /缺pre-push：/);
+  fs.writeFileSync(path.join(work, '缺pre-push', 'scripts', 'hooks.json'), JSON.stringify({ hooks: ['pre-commit'] }));
+  assert.match(doctor(realRun).detail.join('\n'), /缺pre-push：scripts\/hooks\.json：hooks 要是非空数组.*推送、提交会被拦下/);
   fs.rmSync(path.join(work, '缺pre-push'), { recursive: true, force: true });
   fs.writeFileSync(path.join(work, '缺commit-msg', 'scripts', 'hooks', 'commit-msg'), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', 'commit-msg'), 'utf8'), { mode: 0o755 });
   assert.equal(doctor(realRun).status, 'ok', '两个都在就不报');

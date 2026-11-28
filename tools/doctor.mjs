@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntry, stateDir } from '../hooks/lib/common.mjs';
 import { inspect } from './global-instructions.mjs';
+import { HOOK_NAMES, readConfig } from '../git-hooks/config.mjs';
 
 const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MARK = { ok: '✓', warn: '⚠', fail: '✗', info: '·' };
@@ -454,7 +455,7 @@ function checkRepos({ config, run }) {
 // 只读，不替你装。项目目录默认 ~/Documents/ChatGPT/个人/work，可用 doctor.json 的 workRoot 或 AGENT_KIT_WORK_ROOT 覆盖（同 weekly-review）；
 // 名册默认 <项目目录>/digital-twin/projects.json，可用 doctor.json 的 projectsFile 覆盖。
 export const FORWARD_MARK = 'runtime/git-hooks/';
-const GIT_HOOKS = ['pre-push', 'commit-msg'];
+const GIT_HOOKS = HOOK_NAMES;
 
 function frozenRepos(file, home) {
   const data = jsonOr(readText(file), null);
@@ -476,10 +477,11 @@ function worktrees(repo, run) {
   return list.length ? list : [{ path: repo, branch: '' }];
 }
 
-// 两个入口分别查：缺 pre-push 推送前不查，缺 commit-msg 修复提交不查「同类：」，哪个缺都是 ✗（#141 审查 P1-02）
-export function inspectGitHooks(hooksDir) {
+// 两个入口分别查：缺 pre-push 推送前不查，缺 commit-msg 修复提交不查「同类：」，哪个缺都是 ✗（#141 审查 P1-02）。
+// 仓库在 scripts/hooks.json 的 hooks 里写明有意只装一个的（如 digital-twin 2026-11-20 定只装 commit-msg），只查写了的
+export function inspectGitHooks(hooksDir, wanted = GIT_HOOKS) {
   const hooks = GIT_HOOKS.filter(h => fs.existsSync(path.join(hooksDir, h)));
-  const missing = GIT_HOOKS.filter(h => !hooks.includes(h));
+  const missing = wanted.filter(h => !hooks.includes(h));
   const notExec = hooks.filter(h => !(fs.statSync(path.join(hooksDir, h)).mode & 0o111));
   const forward = hooks.filter(h => (readText(path.join(hooksDir, h)) || '').includes(FORWARD_MARK));
   return { hooks, missing, notExec, forward, copies: hooks.filter(h => !forward.includes(h)) };
@@ -531,7 +533,13 @@ function checkRepoHooks({ config, env, home, run, dir }) {
       const hooksDir = path.resolve(wt.path, hp);
       if (hp === '/dev/null') return warn.push(`${label}：core.hooksPath 指向 /dev/null，钩子停用了（有意停用时可忽略）`);
       if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) return noDir.push(i === 0 ? '主检出' : label.slice(path.basename(repo).length + ' 的 worktree '.length));
-      const h = inspectGitHooks(hooksDir);
+      let wanted = GIT_HOOKS;
+      try {
+        wanted = readConfig(wt.path).hooks;
+      } catch (err) {
+        fail.push(`${label}：${err.message}，推送、提交会被拦下`);
+      }
+      const h = inspectGitHooks(hooksDir, wanted);
       if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 和 commit-msg，钩子不跑`);
       if (h.missing.length) fail.push(`${label}：core.hooksPath=${hp}，目录里缺 ${h.missing.join('、')}，${h.missing.includes('pre-push') ? '推送前不查规则、不跑测试' : '修复提交不查「同类：」'}`);
       if (h.notExec.length) fail.push(`${label}：${h.notExec.join('、')} 没有可执行位，git 会跳过它（chmod +x "${hooksDir}/${h.notExec[0]}"）`);

@@ -131,6 +131,12 @@ test('hooks.json 写错了直接报错，不悄悄用默认值', t => {
   assert.throws(() => readConfig(root, names), /checkRules\.scanSh 写的 bin 一个都不存在/);
   write('scripts/hooks.json', JSON.stringify({ checkRules: { scan: ['scripts', '没有'], scanSh: [] } }));
   assert.deepEqual(readConfig(root, names).checkRules.scan, ['scripts', '没有']);
+  write('scripts/hooks.json', JSON.stringify({ hooks: ['pre-commit'] }));
+  assert.throws(() => readConfig(root, names), /hooks 要是非空数组，只能写 pre-push、commit-msg/);
+  write('scripts/hooks.json', JSON.stringify({ hooks: [] }));
+  assert.throws(() => readConfig(root, names), /hooks 要是非空数组/);
+  write('scripts/hooks.json', JSON.stringify({ hooks: ['commit-msg'] }));
+  assert.deepEqual(readConfig(root, names).hooks, ['commit-msg']);
   write('scripts/hooks.json', JSON.stringify({ checkRules: { exts: ['ts'] } }));
   assert.throws(() => readConfig(root, names), /checkRules\.exts 每项要是「\.js」这样以点开头的扩展名/);
   write('scripts/hooks.json', JSON.stringify({ 说明: '只跑快测试', prePushTests: 'npm run test:quick', checkRules: { allowedDeps: ['vite'] } }));
