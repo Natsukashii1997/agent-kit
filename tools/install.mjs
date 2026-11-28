@@ -15,6 +15,7 @@
 // 这样主目录换分支、停在冲突里、worktree 被删，都不影响已经装好的 hook。改了 hooks/ 或 LESSONS.md 要在 main 上重装才生效。
 // 各仓库共用的 git 钩子（agent-kit#133）也复制到 runtime/git-hooks/：各仓库 scripts/hooks/ 里的转发找的就是这里，
 // 不写任何设置文件；改了 git-hooks/ 同样要在 main 上重装，所有转发仓库一起生效。
+// runtime/ 是指向 runtime-versions/<版本> 的符号链接，换版本是一次原子的 rename（见 copyRuntime）；同一时间只许一个安装（install.lock）。
 // 本次新增了哪些权限规则记在状态目录 install-manifest.json，卸载只删这些，你自己原有的同名规则不动。
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -278,24 +279,43 @@ export function gitHooksSelfTest(base = KIT, node = process.execPath) {
   return problems;
 }
 
-// 只从 main 上、没有未提交改动的主目录安装：hook 会在所有会话的每条命令前运行，必须是审过、合并过的版本
-export function branchProblem(kit = KIT) {
-  const git = args => spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8' });
+// 只从 main 上、没有未提交改动、和 GitHub 上的 main 一致的主目录安装：hook 会在所有会话的每条命令前运行，
+// 各仓库的提交、推送也都经过 runtime/git-hooks，必须是审过、合并过的版本（#141 审查 P1-03）。
+// - 本地 main 有没推送的提交（没审过）、或落后远端（旧版本），都不装；连不上远端核对不了，也不装。
+// - 装进去的东西（hooks/、git-hooks/、LESSONS.md）和安装器本身（tools/）、设置模板（config/、global/）有没提交的改动，不装。
+// - git 命令本身失败按核对不了算，不当成「没有改动」。
+// git 可注入，测试用
+export function branchProblem(kit = KIT, git = args => spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8', timeout: 60000 })) {
   const br = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (br.status !== 0) return '这个目录不是 git 仓库，认不出是不是 main 上的版本';
   if (br.stdout.trim() !== 'main') return `当前在 ${br.stdout.trim()} 分支上，不是 main`;
-  const dirty = git(['status', '--porcelain', '--', 'hooks', 'git-hooks', 'config', 'global', 'LESSONS.md']).stdout.trim();
-  if (dirty) return `hooks/、git-hooks/、config/、global/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
+  const st = git(['status', '--porcelain', '--', 'hooks', 'git-hooks', 'tools', 'config', 'global', 'LESSONS.md']);
+  if (st.status !== 0) return `git status 跑不起来（退出码 ${st.status}），核对不了有没有没提交的改动：${String(st.stderr || '').trim()}`;
+  const dirty = st.stdout.trim();
+  if (dirty) return `hooks/、git-hooks/、tools/、config/、global/ 或 LESSONS.md 有没提交的改动：\n${dirty}`;
+  const head = git(['rev-parse', 'HEAD']);
+  const remote = git(['ls-remote', 'origin', 'refs/heads/main']);
+  const want = remote.status === 0 ? remote.stdout.trim().split(/\s/)[0] : '';
+  if (head.status !== 0 || !want) return `连不上 GitHub 上的 main（${String(remote.stderr || '').trim() || `退出码 ${remote.status}`}），核对不了本地 main 是不是已合并的最新版：网络好了再装`;
+  const local = head.stdout.trim();
+  if (local !== want) return `本地 main（${local.slice(0, 7)}）和 GitHub 上的 main（${want.slice(0, 7)}）不一致：落后的先 git pull --ff-only；本地有没推送的提交（没审过）就不要装`;
   return null;
 }
 
-// 先拷到旁边的临时目录，再两次改名换上去：各仓库的转发随时可能在读 runtime/git-hooks，先删后拷的那一下会把提交、推送误拦（#141 审查）
+// 运行目录 runtime 是一个符号链接，指向 runtime-versions/ 下的一个完整版本。装新版本：先在 runtime-versions/ 里拷好一整份，
+// 再做一个临时符号链接，一次 rename 换掉 runtime（换掉符号链接的 rename 是原子的）。各仓库的转发和 Claude、Codex 的 hook
+// 随时都在读 runtime/…，任何时刻它都指向一份完整的版本；拷到一半被杀，runtime 还指着旧版本（#141 审查 P1-01）。
+// 旧装法留下的 runtime 是真目录：第一次换装法时挪进 runtime-versions/ 再换上链接，两次 rename 之间有一次极短的空档，
+// 只发生这一次，而且那时还没有仓库用转发（转发 PR 要等装好才合）；中途断了，重跑安装即可。
+// 旧版本保留最近 2 份（还在跑的钩子可能正用着），再早的删掉。并发安装由 main() 的安装锁挡住。
+export const RUNTIME_KEEP = 2;
 export function copyRuntime(final, kit = KIT) {
+  const versions = `${final}-versions`;
+  fs.mkdirSync(versions, { recursive: true });
+  const id = `${stamp()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const dest = path.join(versions, id);
+  fs.mkdirSync(dest);
   const hooks = path.join(kit, 'hooks');
-  const dest = `${final}.new-${process.pid}`;
-  const old = `${final}.old-${process.pid}`;
-  fs.rmSync(dest, { recursive: true, force: true });
-  fs.mkdirSync(dest, { recursive: true });
   // 只看 hooks/ 以下的相对路径：仓库本身放在 .claude/worktrees/ 这类点开头的目录里时，不能整份跳过；Python 缓存也不复制
   fs.cpSync(hooks, path.join(dest, 'hooks'), { recursive: true, filter: src => !path.relative(hooks, src).split(path.sep).some(p => p.startsWith('.') || p === '__pycache__') });
   fs.copyFileSync(path.join(kit, 'LESSONS.md'), path.join(dest, 'LESSONS.md'));
@@ -303,10 +323,58 @@ export function copyRuntime(final, kit = KIT) {
   const gitHooks = path.join(kit, 'git-hooks');
   fs.cpSync(gitHooks, path.join(dest, 'git-hooks'), { recursive: true, filter: src => !path.relative(gitHooks, src).split(path.sep).some(p => p.startsWith('.')) });
   for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.chmodSync(path.join(dest, 'git-hooks', f), 0o755);
-  fs.rmSync(old, { recursive: true, force: true });
-  if (fs.existsSync(final)) fs.renameSync(final, old);
-  fs.renameSync(dest, final);
-  fs.rmSync(old, { recursive: true, force: true });
+  // 上次被杀留下的临时链接（安装锁保证这时没有别的安装在跑）
+  const dir = path.dirname(final);
+  const base = path.basename(final);
+  for (const f of fs.readdirSync(dir)) if (f.startsWith(`${base}.link-`)) fs.rmSync(path.join(dir, f), { force: true });
+  const link = `${final}.link-${process.pid}`;
+  fs.symlinkSync(path.join(path.basename(versions), id), link);
+  let st = null;
+  try {
+    st = fs.lstatSync(final);
+  } catch {}
+  if (st && !st.isSymbolicLink()) fs.renameSync(final, path.join(versions, `legacy-${id}`));
+  fs.renameSync(link, final);
+  // 留下当前这份和最近 RUNTIME_KEEP 份旧的；按修改时间排（版本名以时间开头，旧装法挪进来的那份也是一份旧版本）
+  const others = fs.readdirSync(versions).filter(f => f !== id).map(f => ({ f, t: fs.statSync(path.join(versions, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+  for (const { f } of others.slice(RUNTIME_KEEP)) fs.rmSync(path.join(versions, f), { recursive: true, force: true });
+}
+
+// 安装锁：同一时间只让一个安装写设置文件和运行目录（#141 审查 P1-01）。锁是状态目录下的 install.lock 目录（mkdir 是原子的），
+// 里面记着持锁进程号；那个进程已经不在了（上次被杀）就当成旧锁清掉再拿。拿不到返回持锁进程号，拿到返回 null
+export function takeInstallLock(sd, pid = process.pid) {
+  const lock = path.join(sd, 'install.lock');
+  fs.mkdirSync(sd, { recursive: true });
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      fs.mkdirSync(lock);
+      fs.writeFileSync(path.join(lock, 'pid'), String(pid));
+      return null;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      let holder = 0;
+      try {
+        holder = Number(fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim());
+      } catch {}
+      // 刚建好锁、还没写进程号的那一下：当成有人在装
+      if (!holder) {
+        if (Date.now() - fs.statSync(lock).mtimeMs < 30000) return -1;
+      }
+      let alive = false;
+      try {
+        alive = Boolean(holder) && (process.kill(holder, 0), true);
+      } catch (e) {
+        alive = e.code === 'EPERM';
+      }
+      if (alive) return holder;
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+  }
+  return -1;
+}
+
+export function releaseInstallLock(sd) {
+  fs.rmSync(path.join(sd, 'install.lock'), { recursive: true, force: true });
 }
 
 // 卸载：去掉 runtime/ 里 agent-kit 的 hook 和 LESSONS，留下 git-hooks/。各仓库的转发还指着它，删了连普通提交都会被拦下（#141 审查）
@@ -428,6 +496,19 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     console.log(`${plan.join('\n')}\n\n以上只是预览，没有改任何文件。确认后加 --apply 再跑一次。`);
     return 0;
   }
+  const holder = takeInstallLock(sd);
+  if (holder) {
+    console.error(`另一个安装正在跑${holder > 0 ? `（进程 ${holder}）` : ''}，这次什么都没改：等它跑完再装。确定没有在装、锁是残留的，删掉 ${path.join(sd, 'install.lock')} 再装`);
+    return 1;
+  }
+  try {
+    return applyPlan({ plan, writes, sd, home, runtime, remove, doClaude, doCodex, manifest, nextManifest, manifestFile });
+  } finally {
+    releaseInstallLock(sd);
+  }
+}
+
+function applyPlan({ plan, writes, sd, home, runtime, remove, doClaude, doCodex, manifest, nextManifest, manifestFile }) {
   const backups = path.join(sd, 'backups', stamp());
   for (const [file, content] of writes) {
     if (fs.existsSync(file)) {

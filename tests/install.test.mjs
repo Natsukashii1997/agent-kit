@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, RUNTIME_KEEP, releaseInstallLock, takeInstallLock, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -349,4 +349,122 @@ test('上下文提醒配置：没有旧位置时拷示例；预览不写', () =>
   assert.ok(!fs.existsSync(dest), '预览不写');
   ensureHandoffConfig(sd, home, { write: true });
   assert.equal(fs.readFileSync(dest, 'utf8'), fs.readFileSync(new URL('../config/context-handoff.example.json', import.meta.url), 'utf8'));
+});
+
+// 一份最小的 agent-kit：copyRuntime 要的 hooks/、LESSONS.md、git-hooks/（入口里写着版本号，方便看换没换上）
+function miniKit(version) {
+  const kit = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-'));
+  fs.mkdirSync(path.join(kit, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(kit, 'hooks', 'guard-git.mjs'), version);
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), version);
+  fs.mkdirSync(path.join(kit, 'git-hooks', 'forward'), { recursive: true });
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.writeFileSync(path.join(kit, 'git-hooks', f), `#!/bin/sh\n# ${version}\n`);
+  fs.writeFileSync(path.join(kit, 'git-hooks', 'pre-push.mjs'), version);
+  return kit;
+}
+
+test('运行目录换版本（#141 审查 P1-01）：旧装法的真目录换成符号链接；再装只换链接；拷到一半失败不动旧版本；旧版本只留最近两份', () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const runtime = path.join(state, 'runtime');
+  // 旧装法留下的真目录
+  fs.mkdirSync(path.join(runtime, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(runtime, 'LESSONS.md'), 'legacy');
+  copyRuntime(runtime, miniKit('v1'));
+  assert.ok(fs.lstatSync(runtime).isSymbolicLink(), '换成符号链接');
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v1');
+  assert.ok(fs.readdirSync(`${runtime}-versions`).some(f => f.startsWith('legacy-')), '旧目录挪进 runtime-versions 当上一版');
+  assert.equal(fs.statSync(path.join(runtime, 'git-hooks', 'pre-push')).mode & 0o777, 0o755);
+
+  // 上次安装被杀留下的临时链接，下次装时清掉
+  fs.symlinkSync('runtime-versions/没有', `${runtime}.link-99999`);
+  copyRuntime(runtime, miniKit('v2'));
+  assert.equal(fs.readFileSync(path.join(runtime, 'git-hooks', 'pre-push.mjs'), 'utf8'), 'v2');
+  assert.ok(!fs.readdirSync(state).some(f => f.includes('.link-')), '临时链接清掉了');
+
+  // 拷到一半失败（这份 kit 缺 forward/commit-msg，给可执行位时抛错）：runtime 还指着 v2
+  const broken = miniKit('v3');
+  fs.rmSync(path.join(broken, 'git-hooks', 'forward', 'commit-msg'));
+  assert.throws(() => copyRuntime(runtime, broken));
+  assert.equal(fs.readFileSync(path.join(runtime, 'git-hooks', 'pre-push.mjs'), 'utf8'), 'v2');
+
+  for (const v of ['v4', 'v5', 'v6']) copyRuntime(runtime, miniKit(v));
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v6');
+  assert.equal(fs.readdirSync(`${runtime}-versions`).length, RUNTIME_KEEP + 1, '当前一份加最近两份旧的');
+});
+
+test('运行目录换版本时一直有人在读（#141 审查 P1-01）：连换 30 次，读的一方一次都没碰到缺文件', async () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const runtime = path.join(state, 'runtime');
+  copyRuntime(runtime, miniKit('v0'));
+  // 和各仓库的转发一样：[ -x .../git-hooks/pre-push ]，再读一份实现文件
+  const reader = spawn('sh', ['-c', 'echo READY; n=0; while :; do n=$((n+1)); [ -x "$R/git-hooks/pre-push" ] && [ -f "$R/git-hooks/pre-push.mjs" ] && [ -f "$R/LESSONS.md" ] || echo "MISSING $n"; [ -f "$R.stop" ] && { echo "DONE $n"; exit 0; }; done'], { env: { ...process.env, R: runtime } });
+  let out = '';
+  reader.stdout.on('data', d => (out += d));
+  const done = new Promise(resolve => reader.on('exit', resolve));
+  // 等读的一方真的跑起来再开始换；等待只看它的输出，不设和机器快慢挂钩的短时限（G-30）
+  while (!out.includes('READY')) await new Promise(r => setTimeout(r, 20));
+  const kits = Array.from({ length: 30 }, (_, i) => miniKit(`v${i + 1}`));
+  for (const kit of kits) copyRuntime(runtime, kit);
+  fs.writeFileSync(`${runtime}.stop`, '');
+  await done;
+  assert.doesNotMatch(out, /MISSING/, out.slice(0, 500));
+  assert.match(out, /DONE \d+/);
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v30');
+});
+
+test('安装锁（#141 审查 P1-01）：有人在装就拒绝、什么都不写；持锁进程已经不在的旧锁清掉再装', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const env = { AGENT_KIT_STATE_DIR: state };
+  assert.equal(takeInstallLock(state, process.pid), null);
+  assert.equal(quiet(() => main(['--apply', '--allow-any-branch'], home, env)), 1, '本进程持着锁：当成另一个安装在跑');
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')));
+  assert.ok(!fs.existsSync(path.join(state, 'runtime')));
+  releaseInstallLock(state);
+  // 上次被杀留下的锁：进程号对应的进程已经不在
+  fs.mkdirSync(path.join(state, 'install.lock'));
+  fs.writeFileSync(path.join(state, 'install.lock', 'pid'), '99999999');
+  assert.equal(quiet(() => main(['--apply', '--allow-any-branch'], home, env)), 0);
+  assert.ok(fs.lstatSync(path.join(state, 'runtime')).isSymbolicLink());
+  assert.ok(!fs.existsSync(path.join(state, 'install.lock')), '装完放开锁');
+});
+
+test('安装前核对版本（#141 审查 P1-03）：本地 main 和 GitHub 上的一致才装；有没推送的提交、落后、连不上、安装器有改动、git status 失败都拒绝', () => {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-branch-'));
+  const origin = path.join(root, 'origin.git');
+  const kit = path.join(root, 'kit');
+  const other = path.join(root, 'other');
+  const git = (dir, ...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env });
+  spawnSync('git', ['init', '-q', '--bare', '-b', 'main', origin], { env });
+  spawnSync('git', ['clone', '-q', origin, kit], { env });
+  git(kit, 'checkout', '-q', '-b', 'main');
+  fs.mkdirSync(path.join(kit, 'tools'));
+  fs.writeFileSync(path.join(kit, 'tools', 'install.mjs'), 'v1');
+  git(kit, 'add', '-A');
+  git(kit, 'commit', '-q', '-m', 'v1');
+  git(kit, 'push', '-q', 'origin', 'main');
+  const check = (g = args => spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8', env })) => branchProblem(kit, g);
+  assert.equal(check(), null, '和远端一致');
+
+  fs.writeFileSync(path.join(kit, 'tools', 'install.mjs'), 'v1 改了没提交');
+  assert.match(check(), /tools\/.*有没提交的改动/);
+  git(kit, 'checkout', '-q', '--', '.');
+
+  git(kit, 'commit', '-q', '--allow-empty', '-m', '没推送');
+  assert.match(check(), /不一致.*没推送的提交/);
+  git(kit, 'reset', '-q', '--hard', 'origin/main');
+
+  spawnSync('git', ['clone', '-q', origin, other], { env });
+  git(other, 'commit', '-q', '--allow-empty', '-m', '远端又进了一个');
+  git(other, 'push', '-q', 'origin', 'main');
+  assert.match(check(), /不一致.*git pull --ff-only/);
+  git(kit, 'pull', '-q', '--ff-only');
+  assert.equal(check(), null);
+
+  git(kit, 'remote', 'set-url', 'origin', path.join(root, '没有这个仓库.git'));
+  assert.match(check(), /连不上 GitHub 上的 main/);
+
+  const failStatus = args => (args[0] === 'status' ? { status: 128, stdout: '', stderr: 'fatal: 坏了' } : spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8', env }));
+  assert.match(check(failStatus), /git status 跑不起来（退出码 128）/);
 });

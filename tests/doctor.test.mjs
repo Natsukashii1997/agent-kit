@@ -300,6 +300,44 @@ test('仓库钩子查真生效（#133）：目录不在、不能执行报 ✗，
   assert.match(ciCheck(withTag).detail.join('\n'), /检出 agent-kit 没写 ref/);
 });
 
+test('仓库钩子：pre-push、commit-msg 分别查，只缺一个也报 ✗；worktree 列不出、core.hooksPath 读不出报「查不全」（#141 审查 P1-02、P2-02）', () => {
+  const home = fakeHome();
+  const dir = stateOf(home);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-work-'));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const KIT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const repo = (name, hooks) => {
+    const r = path.join(work, name);
+    spawnSync('git', ['init', '-q', '-b', 'main', r], { env });
+    fs.mkdirSync(path.join(r, 'scripts', 'hooks'), { recursive: true });
+    for (const h of hooks) fs.writeFileSync(path.join(r, 'scripts', 'hooks', h), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', h), 'utf8'), { mode: 0o755 });
+    spawnSync('git', ['-C', r, 'config', 'core.hooksPath', 'scripts/hooks'], { env });
+    return r;
+  };
+  repo('缺commit-msg', ['pre-push']);
+  repo('缺pre-push', ['commit-msg']);
+  const doctor = run => byName(runDoctor({ home, env: {}, dir, run, config: { workRoot: work, projectsFile: path.join(work, '没有.json') } }), '仓库钩子生效');
+  const r = doctor(realRun);
+  assert.equal(r.status, 'fail');
+  const text = r.detail.join('\n');
+  assert.match(text, /缺commit-msg：core\.hooksPath=scripts\/hooks，目录里缺 commit-msg，修复提交不查「同类：」/);
+  assert.match(text, /缺pre-push：core\.hooksPath=scripts\/hooks，目录里缺 pre-push，推送前不查规则、不跑测试/);
+
+  fs.rmSync(path.join(work, '缺pre-push'), { recursive: true, force: true });
+  fs.writeFileSync(path.join(work, '缺commit-msg', 'scripts', 'hooks', 'commit-msg'), fs.readFileSync(path.join(KIT, 'git-hooks', 'forward', 'commit-msg'), 'utf8'), { mode: 0o755 });
+  assert.equal(doctor(realRun).status, 'ok', '两个都在就不报');
+  // worktree list 失败：不能退回只查主检出还报 ok
+  const noList = (cmd, args, opts) => (args.includes('worktree') ? { code: 128, stdout: '', stderr: 'fatal' } : realRun(cmd, args, opts));
+  const partial = doctor(noList);
+  assert.equal(partial.status, 'warn');
+  assert.match(partial.detail.join('\n'), /缺commit-msg：git worktree list 跑不起来，只查了主检出.*查不全/);
+  // core.hooksPath 读不出（退出码不是 0 也不是 1）：不能当成没设
+  const noConfig = (cmd, args, opts) => (args.includes('core.hooksPath') ? { code: 128, stdout: '', stderr: 'fatal' } : realRun(cmd, args, opts));
+  const unread = doctor(noConfig);
+  assert.equal(unread.status, 'warn');
+  assert.match(unread.detail.join('\n'), /缺commit-msg：读不出 core\.hooksPath（退出码 128），这处没查（查不全）/);
+});
+
 test('仓库钩子：还没有仓库用转发时，运行目录缺共用实现只报 ⚠，不报 ✗（#141 审查）', () => {
   const home = fakeHome();
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-work-'));

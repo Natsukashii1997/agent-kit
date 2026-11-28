@@ -463,10 +463,11 @@ function frozenRepos(file, home) {
   return { set: new Set((data.projects || []).filter(p => p.category === '冻结').map(p => expand(p.path))) };
 }
 
-// git worktree list --porcelain → [{ path, branch }]，第一个是主检出；目录已经不在的跳过
+// git worktree list --porcelain → [{ path, branch }]，第一个是主检出；目录已经不在的跳过。
+// 列不出来时返回 null：只查主检出会把别的 worktree 漏掉，调用方要报「查不全」（#141 审查 P2-02）
 function worktrees(repo, run) {
   const out = run('git', ['-C', repo, 'worktree', 'list', '--porcelain']);
-  if (out.code !== 0) return [{ path: repo, branch: '' }];
+  if (out.code !== 0) return null;
   const list = [];
   for (const block of out.stdout.split('\n\n')) {
     const p = block.match(/^worktree (.+)$/m)?.[1];
@@ -475,11 +476,13 @@ function worktrees(repo, run) {
   return list.length ? list : [{ path: repo, branch: '' }];
 }
 
+// 两个入口分别查：缺 pre-push 推送前不查，缺 commit-msg 修复提交不查「同类：」，哪个缺都是 ✗（#141 审查 P1-02）
 export function inspectGitHooks(hooksDir) {
   const hooks = GIT_HOOKS.filter(h => fs.existsSync(path.join(hooksDir, h)));
+  const missing = GIT_HOOKS.filter(h => !hooks.includes(h));
   const notExec = hooks.filter(h => !(fs.statSync(path.join(hooksDir, h)).mode & 0o111));
   const forward = hooks.filter(h => (readText(path.join(hooksDir, h)) || '').includes(FORWARD_MARK));
-  return { hooks, notExec, forward, copies: hooks.filter(h => !forward.includes(h)) };
+  return { hooks, missing, notExec, forward, copies: hooks.filter(h => !forward.includes(h)) };
 }
 
 function checkRepoHooks({ config, env, home, run, dir }) {
@@ -508,11 +511,16 @@ function checkRepoHooks({ config, env, home, run, dir }) {
   for (const repo of repos) {
     const isFrozen = frozen.set.has(path.resolve(repo));
     const noDir = [];
-    worktrees(repo, run).forEach((wt, i) => {
+    const list = worktrees(repo, run);
+    if (!list) warn.push(`${path.basename(repo)}：git worktree list 跑不起来，只查了主检出，别的 worktree 没查（查不全）`);
+    (list || [{ path: repo, branch: '' }]).forEach((wt, i) => {
       const rel = path.relative(fs.realpathSync(repo), fs.realpathSync(wt.path));
       const label = i === 0 ? path.basename(repo) : `${path.basename(repo)} 的 worktree ${rel.startsWith('..') ? wt.path : rel}（${wt.branch}）`;
       // --path：和 git 自己一样展开 ~/（#141 审查）
-      const hp = run('git', ['-C', wt.path, 'config', '--path', 'core.hooksPath']).stdout.trim();
+      // 退出码 1 是没设；别的非零是读不出来，不能当成没设（#141 审查 P2-02）
+      const cfg = run('git', ['-C', wt.path, 'config', '--path', 'core.hooksPath']);
+      if (cfg.code !== 0 && cfg.code !== 1) return warn.push(`${label}：读不出 core.hooksPath（退出码 ${cfg.code}），这处没查（查不全）`);
+      const hp = cfg.code === 0 ? cfg.stdout.trim() : '';
       if (!hp) {
         // 带钩子却没设：只看主检出，worktree 跟着主仓库的配置走
         if (i === 0 && GIT_HOOKS.some(h => fs.existsSync(path.join(wt.path, 'scripts', 'hooks', h))))
@@ -524,7 +532,8 @@ function checkRepoHooks({ config, env, home, run, dir }) {
       if (hp === '/dev/null') return warn.push(`${label}：core.hooksPath 指向 /dev/null，钩子停用了（有意停用时可忽略）`);
       if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) return noDir.push(i === 0 ? '主检出' : label.slice(path.basename(repo).length + ' 的 worktree '.length));
       const h = inspectGitHooks(hooksDir);
-      if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 或 commit-msg，钩子不跑`);
+      if (!h.hooks.length) return fail.push(`${label}：core.hooksPath=${hp}，目录里没有 pre-push 和 commit-msg，钩子不跑`);
+      if (h.missing.length) fail.push(`${label}：core.hooksPath=${hp}，目录里缺 ${h.missing.join('、')}，${h.missing.includes('pre-push') ? '推送前不查规则、不跑测试' : '修复提交不查「同类：」'}`);
       if (h.notExec.length) fail.push(`${label}：${h.notExec.join('、')} 没有可执行位，git 会跳过它（chmod +x "${hooksDir}/${h.notExec[0]}"）`);
       forwarders += h.forward.length;
       if (i === 0 && !isFrozen && (h.copies.length || fs.existsSync(path.join(wt.path, 'scripts', 'check-rules.mjs'))))

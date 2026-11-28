@@ -75,6 +75,10 @@ export function readConfig(root, ruleNames = []) {
       if (key === NOTE) continue;
       if (!(key in DEFAULTS.checkRules)) throw bad(`checkRules 里不认识的键「${key}」，能写的只有 ${Object.keys(DEFAULTS.checkRules).join('、')}`);
       if (!isList(value)) throw bad(`checkRules.${key} 要是字符串数组`);
+      // 写了扫描目录却一个都不在（多是拼错，如 srcs）：规则检查等于没查还报通过，直接报错。写空数组是有意不扫，照常（#141 审查 P2-04）
+      if ((key === 'scan' || key === 'scanSh') && value.length && !value.some(d => fs.existsSync(path.join(root, d))))
+        throw bad(`checkRules.${key} 写的 ${value.join('、')} 一个都不存在，规则检查等于没查：改成实际的目录，有意不扫写 []`);
+      if (key === 'exts' && value.some(e => !/^\.\w+$/.test(e))) throw bad(`checkRules.exts 每项要是「.js」这样以点开头的扩展名，现在是 ${value.join('、')}`);
       checkRules[key] = value;
     }
     const unknown = checkRules.off.filter(name => ruleNames.length && !ruleNames.includes(name));

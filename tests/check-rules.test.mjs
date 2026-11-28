@@ -73,6 +73,22 @@ test('G-08：注释、字符串、env X=1 cmd 里的「X=」不算赋过值；fo
   assert.deepEqual(kinds(root), ['scripts/a.sh:3 optvar', 'scripts/a.sh:5 optvar', 'scripts/a.sh:7 optvar', 'scripts/a.sh:12 optvar']);
 });
 
+test('G-08：引号里的 && ; # 不切、不当注释（#141 审查 P2-01）：echo "x && DEBUG=1" 不算给 DEBUG 赋过值', t => {
+  const { root, write } = tempRoot(t);
+  write('scripts/a.sh', [
+    'set -eu',
+    'echo "dummy && DEBUG=1"',
+    '[ -n "$DEBUG" ]',
+    "echo 'a; QUIET=1'",
+    '[ -z "$QUIET" ]',
+    'echo "价格 #1"; REAL=1',
+    '[ -n "$REAL" ]',
+    'echo "转义 \\" && ESC=1"',
+    '[ -n "$ESC" ]',
+  ].join('\n') + '\n');
+  assert.deepEqual(kinds(root), ['scripts/a.sh:3 optvar', 'scripts/a.sh:5 optvar', 'scripts/a.sh:9 optvar']);
+});
+
 test('各仓库的差异写在 scripts/hooks.json：扫哪些目录、扩展名、跳过的目录、依赖白名单、关掉的规则', t => {
   const { root, write } = tempRoot(t);
   write('host/a.ts', 'show(item.createdAt.slice(0, 16));\n');
@@ -108,6 +124,15 @@ test('hooks.json 写错了直接报错，不悄悄用默认值', t => {
   assert.throws(() => readConfig(root, names), /checkRules\.scan 要是字符串数组/);
   write('scripts/hooks.json', JSON.stringify({ prePushTests: '' }));
   assert.throws(() => readConfig(root, names), /prePushTests 要是非空字符串/);
+  // 写了扫描目录却一个都不在：规则检查等于没查，报错；部分不在照常；写空数组是有意不扫（#141 审查 P2-04）
+  write('scripts/hooks.json', JSON.stringify({ checkRules: { scan: ['srcs', 'servr'] } }));
+  assert.throws(() => readConfig(root, names), /checkRules\.scan 写的 srcs、servr 一个都不存在/);
+  write('scripts/hooks.json', JSON.stringify({ checkRules: { scanSh: ['bin'] } }));
+  assert.throws(() => readConfig(root, names), /checkRules\.scanSh 写的 bin 一个都不存在/);
+  write('scripts/hooks.json', JSON.stringify({ checkRules: { scan: ['scripts', '没有'], scanSh: [] } }));
+  assert.deepEqual(readConfig(root, names).checkRules.scan, ['scripts', '没有']);
+  write('scripts/hooks.json', JSON.stringify({ checkRules: { exts: ['ts'] } }));
+  assert.throws(() => readConfig(root, names), /checkRules\.exts 每项要是「\.js」这样以点开头的扩展名/);
   write('scripts/hooks.json', JSON.stringify({ 说明: '只跑快测试', prePushTests: 'npm run test:quick', checkRules: { allowedDeps: ['vite'] } }));
   const cfg = readConfig(root, names);
   assert.equal(cfg.prePushTests, 'npm run test:quick');

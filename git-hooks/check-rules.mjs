@@ -33,13 +33,42 @@ const NAME = /^[A-Za-z_]\w*$/;
 
 // 脚本自己赋过值的变量（不是可选开关，G-08 不报；agent-autoloop 带回，#141 审查后收紧）：
 // 命令开头的 X=…（含 if ! X=$(…)、then / do 之后）、local / export / readonly / declare / typeset 后的每个 X=…、for X in、read 读进的变量。
-// 注释、echo 里的字符串、env X=1 cmd（只给子进程设）都不算。按 ; && || | ( { ! 和 if / then / do / while 等关键字切成一段段命令再认
+// 注释、echo 里的字符串、env X=1 cmd（只给子进程设）都不算。按引号外的 ; & | ( ) { } ! 切成一段段命令，去掉段首的
+// if / then / do / while 等关键字再认。引号里的 && ; # 不切、不当注释（#141 审查 P2-01：echo "x && DEBUG=1" 不算赋值）
+export function shellSegments(line) {
+  const segs = [];
+  let cur = '';
+  let quote = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const c = line[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') {
+        cur += c + (line[i + 1] ?? '');
+        i += 1;
+      } else {
+        if (c === quote) quote = '';
+        cur += c;
+      }
+    } else if (c === '\\') {
+      cur += c + (line[i + 1] ?? '');
+      i += 1;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      cur += c;
+    } else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
+    else if (';&|(){}!'.includes(c)) {
+      segs.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  segs.push(cur);
+  return segs.map(t => t.trim().replace(/^(?:(?:if|then|elif|else|do|while|until)\s+)+/, '')).filter(Boolean);
+}
+
 export function assignedNames(src) {
   const names = new Set();
-  for (const raw of src.split('\n')) {
-    const line = raw.replace(/^\s*#.*$/, '').replace(/\s#.*$/, '');
-    for (const seg of line.split(/;|&&|\|\||\||\(|\)|\{|\}|!|\b(?:if|then|elif|else|do|while|until)\b/)) {
-      const t = seg.trim();
+  for (const line of src.split('\n')) {
+    for (const t of shellSegments(line)) {
       const decl = t.match(/^(?:local|export|readonly|declare|typeset)((?:\s+-\w+)*)\s+(.*)$/);
       if (decl) for (const m of decl[2].matchAll(/(?:^|\s)([A-Za-z_]\w*)=/g)) names.add(m[1]);
       const lead = t.match(/^([A-Za-z_]\w*)=/);
