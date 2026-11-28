@@ -1,0 +1,3 @@
+#!/bin/sh
+# 共用的提交说明检查入口（运行目录里的这份由各仓库 scripts/hooks/commit-msg 转发过来）。实现在同目录 commit-msg.mjs。
+exec node "$(dirname "$0")/commit-msg.mjs" "$1"

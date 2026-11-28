@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { branchProblem, copyRuntime, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, selfTest } from '../tools/install.mjs';
+import { branchProblem, copyRuntime, installLockDirs, RUNTIME_KEEP, releaseInstallLock, takeInstallLock, takeInstallLocks, ensureHandoffConfig, ensureOrganizeConfig, isOurHook, main, mergeHooks, mergeRules, ourHookGroups, ourPromptGroups, ourStartGroups, remindChangedAt, selfTest } from '../tools/install.mjs';
 
 const quiet = fn => {
   const log = console.log;
@@ -150,7 +150,10 @@ test('整套安装：预览不写；--apply 写入、备份到状态目录、hoo
   assert.ok(fs.existsSync(path.join(handoffDir, 'config.json')), '卸载不删上下文提醒配置');
   assert.ok(!fs.existsSync(path.join(home, '.codex', 'rules', 'agent-kit.rules')));
   assert.deepEqual(fs.readdirSync(path.join(home, '.codex', 'rules')), [], '规则目录里不留备份');
-  assert.ok(!fs.existsSync(path.join(state, 'runtime')));
+  // 共用 git 钩子留着：各仓库的转发还指着它，删了那些仓库连普通提交都会被拦下（#141 审查）
+  assert.deepEqual(fs.readdirSync(path.join(state, 'runtime')), ['git-hooks']);
+  assert.ok(fs.existsSync(path.join(state, 'runtime', 'git-hooks', 'pre-push')));
+  assert.ok(!fs.readdirSync(state).some(f => /^runtime\.(new|old)-/.test(f)), '重装用的临时目录不留下');
   assert.ok(!fs.existsSync(path.join(state, 'install-manifest.json')));
 });
 
@@ -265,10 +268,35 @@ test('复制 hook 副本：仓库路径里有点开头的目录（如 .claude/wo
   fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', 'session_organize_once.py'), '');
   fs.writeFileSync(path.join(kit, 'hooks', 'session-organize-once', '__pycache__', 'x.pyc'), '');
   fs.writeFileSync(path.join(kit, 'LESSONS.md'), '');
+  // 共用 git 钩子（#133）：整份复制，入口不管原来有没有可执行位都给上
+  fs.mkdirSync(path.join(kit, 'git-hooks', 'forward'), { recursive: true });
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg', 'pre-push.mjs']) fs.writeFileSync(path.join(kit, 'git-hooks', f), '', { mode: 0o644 });
+  fs.writeFileSync(path.join(kit, 'git-hooks', '.DS_Store'), '');
   const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-')), 'runtime');
   copyRuntime(dest, kit);
   assert.deepEqual(fs.readdirSync(path.join(dest, 'hooks'), { recursive: true }).sort(), ['guard-git.mjs', 'lib', 'lib/common.mjs', 'session-organize-once', 'session-organize-once/session_organize_once.py']);
   assert.ok(fs.existsSync(path.join(dest, 'LESSONS.md')));
+  assert.deepEqual(fs.readdirSync(path.join(dest, 'git-hooks'), { recursive: true }).sort(), ['commit-msg', 'forward', 'forward/commit-msg', 'forward/pre-push', 'pre-push', 'pre-push.mjs']);
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) assert.equal(fs.statSync(path.join(dest, 'git-hooks', f)).mode & 0o777, 0o755, f);
+});
+
+test('坑提醒规则的变化时间（#133）：LESSONS.md 或 lessons-remind.mjs 和已装副本不同才更新，相同就沿用', () => {
+  const kit = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-'));
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-rt-'));
+  for (const root of [kit, runtime]) {
+    fs.mkdirSync(path.join(root, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'LESSONS.md'), '- 触发：`/tmp/`\n');
+    fs.writeFileSync(path.join(root, 'hooks', 'lessons-remind.mjs'), 'v1');
+  }
+  const now = '2026-11-27T10:00:00.000Z';
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z', installedAt: '2026-11-26T00:00:00.000Z' }, now, kit), '2026-11-21T09:00:00.000Z', '没变就沿用');
+  assert.equal(remindChangedAt(runtime, { installedAt: '2026-11-26T00:00:00.000Z' }, now, kit), '2026-11-26T00:00:00.000Z', '旧记录没有这一项，退回上次安装时间');
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), '- 触发：无\n');
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z' }, now, kit), now, 'LESSONS 变了');
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), '- 触发：`/tmp/`\n');
+  fs.writeFileSync(path.join(kit, 'hooks', 'lessons-remind.mjs'), 'v2');
+  assert.equal(remindChangedAt(runtime, { remindChangedAt: '2026-11-21T09:00:00.000Z' }, now, kit), now, '提醒钩子变了');
+  assert.equal(remindChangedAt(path.join(runtime, '没有'), {}, now, kit), now, '第一次装');
 });
 
 test('上下文提醒（#105）：旧路径条目重装时换成 runtime 副本；配置和提醒记录从旧位置迁移，已有的不覆盖、旧目录不删', () => {
@@ -321,4 +349,245 @@ test('上下文提醒配置：没有旧位置时拷示例；预览不写', () =>
   assert.ok(!fs.existsSync(dest), '预览不写');
   ensureHandoffConfig(sd, home, { write: true });
   assert.equal(fs.readFileSync(dest, 'utf8'), fs.readFileSync(new URL('../config/context-handoff.example.json', import.meta.url), 'utf8'));
+});
+
+// 一份最小的 agent-kit：copyRuntime 要的 hooks/、LESSONS.md、git-hooks/（入口里写着版本号，方便看换没换上）
+function miniKit(version) {
+  const kit = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-kit-'));
+  fs.mkdirSync(path.join(kit, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(kit, 'hooks', 'guard-git.mjs'), version);
+  fs.writeFileSync(path.join(kit, 'LESSONS.md'), version);
+  fs.mkdirSync(path.join(kit, 'git-hooks', 'forward'), { recursive: true });
+  for (const f of ['pre-push', 'commit-msg', 'forward/pre-push', 'forward/commit-msg']) fs.writeFileSync(path.join(kit, 'git-hooks', f), `#!/bin/sh\n# ${version}\n`);
+  fs.writeFileSync(path.join(kit, 'git-hooks', 'pre-push.mjs'), version);
+  return kit;
+}
+
+test('运行目录换版本（#141 审查 P1-01）：旧装法的真目录换成符号链接；再装只换链接；拷到一半失败不动旧版本；旧版本只留最近两份', () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const runtime = path.join(state, 'runtime');
+  // 旧装法留下的真目录
+  fs.mkdirSync(path.join(runtime, 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(runtime, 'LESSONS.md'), 'legacy');
+  copyRuntime(runtime, miniKit('v1'));
+  assert.ok(fs.lstatSync(runtime).isSymbolicLink(), '换成符号链接');
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v1');
+  assert.ok(fs.readdirSync(`${runtime}-versions`).some(f => f.startsWith('legacy-')), '旧目录挪进 runtime-versions 当上一版');
+  assert.equal(fs.statSync(path.join(runtime, 'git-hooks', 'pre-push')).mode & 0o777, 0o755);
+
+  // 上次安装被杀留下的临时链接，下次装时清掉
+  fs.symlinkSync('runtime-versions/没有', `${runtime}.link-99999`);
+  copyRuntime(runtime, miniKit('v2'));
+  assert.equal(fs.readFileSync(path.join(runtime, 'git-hooks', 'pre-push.mjs'), 'utf8'), 'v2');
+  assert.ok(!fs.readdirSync(state).some(f => f.includes('.link-')), '临时链接清掉了');
+
+  // 拷到一半失败（这份 kit 缺 forward/commit-msg，给可执行位时抛错）：runtime 还指着 v2，拷了一半的目录清掉
+  const before = fs.readdirSync(`${runtime}-versions`).sort();
+  const broken = miniKit('v3');
+  fs.rmSync(path.join(broken, 'git-hooks', 'forward', 'commit-msg'));
+  assert.throws(() => copyRuntime(runtime, broken));
+  assert.throws(() => copyRuntime(runtime, broken), '连着失败两次');
+  assert.equal(fs.readFileSync(path.join(runtime, 'git-hooks', 'pre-push.mjs'), 'utf8'), 'v2');
+  assert.deepEqual(fs.readdirSync(`${runtime}-versions`).sort(), before, '没留下拷了一半的目录');
+  // 就算留下了（比如被 kill -9）：没有完成标记，不占旧版本的名额，切换前那一版（v2）一定留着（#141 审查 P2-06）
+  const v2 = fs.readlinkSync(runtime);
+  for (const n of ['半截a', '半截b']) fs.mkdirSync(path.join(`${runtime}-versions`, n));
+  copyRuntime(runtime, miniKit('v3ok'));
+  assert.ok(fs.existsSync(path.join(state, v2, 'LESSONS.md')), '上一版 v2 还在');
+  assert.ok(!fs.readdirSync(`${runtime}-versions`).some(f => f.startsWith('半截')), '没完成标记的删掉');
+
+  for (const v of ['v4', 'v5', 'v6']) copyRuntime(runtime, miniKit(v));
+  const prevV5 = fs.readdirSync(`${runtime}-versions`).find(f => fs.existsSync(path.join(`${runtime}-versions`, f, 'LESSONS.md')) && fs.readFileSync(path.join(`${runtime}-versions`, f, 'LESSONS.md'), 'utf8') === 'v5');
+  assert.ok(prevV5, '切换前那一版 v5 留着');
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v6');
+  assert.equal(fs.readdirSync(`${runtime}-versions`).length, RUNTIME_KEEP + 1, '当前一份加最近两份旧的');
+});
+
+test('运行目录换版本时一直有人在读（#141 审查 P1-01）：连换 30 次，读的一方一次都没碰到缺文件', async () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const runtime = path.join(state, 'runtime');
+  copyRuntime(runtime, miniKit('v0'));
+  // 和各仓库的转发一样：[ -x .../git-hooks/pre-push ]，再读一份实现文件
+  const reader = spawn('sh', ['-c', 'echo READY; n=0; while :; do n=$((n+1)); [ -x "$R/git-hooks/pre-push" ] && [ -f "$R/git-hooks/pre-push.mjs" ] && [ -f "$R/LESSONS.md" ] || echo "MISSING $n"; [ -f "$R.stop" ] && { echo "DONE $n"; exit 0; }; done'], { env: { ...process.env, R: runtime } });
+  let out = '';
+  reader.stdout.on('data', d => (out += d));
+  const done = new Promise(resolve => reader.on('exit', resolve));
+  // 等读的一方真的跑起来再开始换；等待只看它的输出，不设和机器快慢挂钩的短时限（G-30）
+  while (!out.includes('READY')) await new Promise(r => setTimeout(r, 20));
+  const kits = Array.from({ length: 30 }, (_, i) => miniKit(`v${i + 1}`));
+  for (const kit of kits) copyRuntime(runtime, kit);
+  fs.writeFileSync(`${runtime}.stop`, '');
+  await done;
+  assert.doesNotMatch(out, /MISSING/, out.slice(0, 500));
+  assert.match(out, /DONE \d+/);
+  assert.equal(fs.readFileSync(path.join(runtime, 'LESSONS.md'), 'utf8'), 'v30');
+});
+
+test('安装锁（#141 审查 P1-01、P1-04）：有人在装就拒绝、什么都不写；持锁进程不在了也不自动回收，说清楚让人删；放锁只放自己的', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const env = { AGENT_KIT_STATE_DIR: state };
+  const mine = takeInstallLock(state, process.pid);
+  assert.ok(mine.token);
+  assert.deepEqual(takeInstallLock(state, process.pid), { holder: process.pid, alive: true, complete: true }, '第二个拿不到');
+  assert.deepEqual(fs.readdirSync(path.join(state, 'install.lock')).sort(), ['pid', 'token'], '锁里只有进程号和口令，没有临时文件');
+  let err = '';
+  const log = console.error;
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, env), 1, '本进程持着锁：当成另一个安装在跑');
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /另一个安装正在跑（进程 \d+）/);
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')));
+  assert.ok(!fs.existsSync(path.join(state, 'runtime')));
+  releaseInstallLock(state, '别人的口令');
+  assert.ok(fs.existsSync(path.join(state, 'install.lock')), '口令不对不放');
+  releaseInstallLock(state, mine.token);
+  assert.ok(!fs.existsSync(path.join(state, 'install.lock')));
+
+  // 上次被杀留下的锁：不自动回收，拒装并说怎么删
+  fs.mkdirSync(path.join(state, 'install.lock'));
+  fs.writeFileSync(path.join(state, 'install.lock', 'pid'), '99999999');
+  fs.writeFileSync(path.join(state, 'install.lock', 'token'), '上次的口令');
+  err = '';
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, env), 1);
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /记的进程 99999999 已经不在.*删掉这个目录/);
+  assert.ok(fs.existsSync(path.join(state, 'install.lock')), '旧锁原样留着');
+  fs.rmSync(path.join(state, 'install.lock'), { recursive: true });
+  assert.equal(quiet(() => main(['--apply', '--allow-any-branch'], home, env)), 0);
+  assert.ok(fs.lstatSync(path.join(state, 'runtime')).isSymbolicLink());
+  assert.ok(!fs.existsSync(path.join(state, 'install.lock')), '装完放开锁');
+});
+
+test('安装锁（#141 第 3 轮审查 P1-04）：锁目录已在就拿不到，空的、只写了一半的也一样，不会被替换；拒装并说清楚', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const state = path.join(home, 'state');
+  const lock = path.join(state, 'install.lock');
+  // 旧版安装器「先 mkdir 再写进程号」的那一下：锁目录是空的
+  fs.mkdirSync(lock, { recursive: true });
+  const before = fs.statSync(lock).ino;
+  assert.deepEqual(takeInstallLock(state), { holder: 0, alive: false, complete: false });
+  assert.equal(fs.statSync(lock).ino, before, '空锁目录原样留着，没被换掉');
+  assert.deepEqual(fs.readdirSync(lock), [], '也没往别人的锁里写东西');
+  // 只写了进程号、还没写口令（持锁进程还活着）：照样拿不到
+  fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
+  assert.deepEqual(takeInstallLock(state), { holder: process.pid, alive: true, complete: false });
+  fs.rmSync(path.join(lock, 'pid'));
+  let err = '';
+  const log = console.error;
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: state }), 1);
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /里面还没写完.*删掉这个目录/);
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')), '什么都没写');
+});
+
+test('安装锁的范围（#141 第 3 轮审查 P1-04）：同一个 home、AGENT_KIT_STATE_DIR 不同也是同一把锁；拿不齐时已拿的放掉', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const a = path.join(home, 'state-a');
+  const b = path.join(home, 'state-b');
+  const homeLock = path.join(home, 'Library', 'Application Support', 'agent-kit');
+  assert.deepEqual(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'), [homeLock, a]);
+  assert.deepEqual(installLockDirs(home, {}, 'darwin'), [homeLock], '没改状态目录只有一把');
+  const first = takeInstallLocks(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  assert.equal(first.got.length, 2);
+  let err = '';
+  const log = console.error;
+  console.error = m => (err += m);
+  try {
+    assert.equal(main(['--apply', '--allow-any-branch'], home, { AGENT_KIT_STATE_DIR: b }), 1, '换个状态目录也拿不到');
+  } finally {
+    console.error = log;
+  }
+  assert.match(err, /另一个安装正在跑/);
+  assert.ok(!fs.existsSync(path.join(b, 'install.lock')), '没拿齐，状态目录那把也没留下');
+  assert.ok(!fs.existsSync(path.join(home, '.claude', 'settings.json')));
+  for (const [d, t] of first.got) releaseInstallLock(d, t);
+  // 两个 home 共用一个状态目录：状态目录那把挡住
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const held = takeInstallLocks(installLockDirs(other, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  const r = takeInstallLocks(installLockDirs(home, { AGENT_KIT_STATE_DIR: a }, 'darwin'));
+  assert.equal(r.dir, a);
+  assert.ok(!fs.existsSync(path.join(homeLock, 'install.lock')), '先拿到的 home 那把放掉了');
+  for (const [d, t] of held.got) releaseInstallLock(d, t);
+});
+
+test('安装锁并发（#141 第 3 轮审查 P1-04）：同一个 home、20 个进程各用不同的 AGENT_KIT_STATE_DIR 同时抢，只有一个拿到', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-home-'));
+  const url = new URL('../tools/install.mjs', import.meta.url).href;
+  const code = `const m = await import(${JSON.stringify(url)}); const r = m.takeInstallLocks(m.installLockDirs(process.argv[1], { AGENT_KIT_STATE_DIR: process.argv[2] }, 'darwin')); console.log(r.got ? 'GOT' : 'NO');`;
+  const runs = Array.from({ length: 20 }, (_, i) => new Promise(resolve => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code, home, path.join(home, `state-${i}`)]);
+    let out = '';
+    c.stdout.on('data', d => (out += d));
+    c.on('exit', () => resolve(out.trim()));
+  }));
+  const results = await Promise.all(runs);
+  assert.equal(results.filter(r => r === 'GOT').length, 1, results.join(','));
+  assert.equal(results.filter(r => r === 'NO').length, 19);
+});
+
+test('安装锁并发（#141 审查 P1-04）：20 个进程同时抢一把锁，只有一个拿到', async () => {
+  const state = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-state-'));
+  const url = new URL('../tools/install.mjs', import.meta.url).href;
+  const code = `const { takeInstallLock } = await import(${JSON.stringify(url)}); const r = takeInstallLock(process.argv[1]); console.log(r.token ? 'GOT' : 'NO');`;
+  const runs = Array.from({ length: 20 }, () => new Promise(resolve => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code, state]);
+    let out = '';
+    c.stdout.on('data', d => (out += d));
+    c.on('exit', () => resolve(out.trim()));
+  }));
+  const results = await Promise.all(runs);
+  assert.equal(results.filter(r => r === 'GOT').length, 1, results.join(','));
+  assert.equal(results.filter(r => r === 'NO').length, 19);
+});
+
+test('安装前核对版本（#141 审查 P1-03）：本地 main 和 GitHub 上的一致才装；有没推送的提交、落后、连不上、安装器有改动、git status 失败都拒绝', () => {
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ak-branch-'));
+  const origin = path.join(root, 'origin.git');
+  const kit = path.join(root, 'kit');
+  const other = path.join(root, 'other');
+  const git = (dir, ...args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env });
+  spawnSync('git', ['init', '-q', '--bare', '-b', 'main', origin], { env });
+  spawnSync('git', ['clone', '-q', origin, kit], { env });
+  git(kit, 'checkout', '-q', '-b', 'main');
+  fs.mkdirSync(path.join(kit, 'tools'));
+  fs.writeFileSync(path.join(kit, 'tools', 'install.mjs'), 'v1');
+  git(kit, 'add', '-A');
+  git(kit, 'commit', '-q', '-m', 'v1');
+  git(kit, 'push', '-q', 'origin', 'main');
+  const check = (g = args => spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8', env })) => branchProblem(kit, g);
+  assert.equal(check(), null, '和远端一致');
+
+  fs.writeFileSync(path.join(kit, 'tools', 'install.mjs'), 'v1 改了没提交');
+  assert.match(check(), /tools\/.*有没提交的改动/);
+  git(kit, 'checkout', '-q', '--', '.');
+
+  git(kit, 'commit', '-q', '--allow-empty', '-m', '没推送');
+  assert.match(check(), /不一致.*没推送的提交/);
+  git(kit, 'reset', '-q', '--hard', 'origin/main');
+
+  spawnSync('git', ['clone', '-q', origin, other], { env });
+  git(other, 'commit', '-q', '--allow-empty', '-m', '远端又进了一个');
+  git(other, 'push', '-q', 'origin', 'main');
+  assert.match(check(), /不一致.*git pull --ff-only/);
+  git(kit, 'pull', '-q', '--ff-only');
+  assert.equal(check(), null);
+
+  git(kit, 'remote', 'set-url', 'origin', path.join(root, '没有这个仓库.git'));
+  assert.match(check(), /连不上 GitHub 上的 main/);
+
+  const failStatus = args => (args[0] === 'status' ? { status: 128, stdout: '', stderr: 'fatal: 坏了' } : spawnSync('git', ['-C', kit, ...args], { encoding: 'utf8', env }));
+  assert.match(check(failStatus), /git status 跑不起来（退出码 128）/);
 });
