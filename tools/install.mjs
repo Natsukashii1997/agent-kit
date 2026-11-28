@@ -398,7 +398,23 @@ export function remindChangedAt(runtime, manifest, now, kit = KIT) {
   return changed ? now : manifest.remindChangedAt || manifest.installedAt || now;
 }
 
+// --apply 时整个过程（读设置、算改动、写设置、换运行目录）都在安装锁里：先读后写之间别的安装插进来，会拿旧内容盖掉它写的
 export function main(argv = process.argv.slice(2), home = os.homedir(), env = process.env) {
+  if (!argv.includes('--apply')) return install(argv, home, env);
+  const sd = stateDir(env, process.platform, home);
+  const holder = takeInstallLock(sd);
+  if (holder) {
+    console.error(`另一个安装正在跑${holder > 0 ? `（进程 ${holder}）` : ''}，这次什么都没改：等它跑完再装。确定没有在装、锁是残留的，删掉 ${path.join(sd, 'install.lock')} 再装`);
+    return 1;
+  }
+  try {
+    return install(argv, home, env);
+  } finally {
+    releaseInstallLock(sd);
+  }
+}
+
+function install(argv, home, env) {
   const apply = argv.includes('--apply');
   const remove = argv.includes('--uninstall');
   const onlyIdx = argv.indexOf('--only');
@@ -496,19 +512,6 @@ export function main(argv = process.argv.slice(2), home = os.homedir(), env = pr
     console.log(`${plan.join('\n')}\n\n以上只是预览，没有改任何文件。确认后加 --apply 再跑一次。`);
     return 0;
   }
-  const holder = takeInstallLock(sd);
-  if (holder) {
-    console.error(`另一个安装正在跑${holder > 0 ? `（进程 ${holder}）` : ''}，这次什么都没改：等它跑完再装。确定没有在装、锁是残留的，删掉 ${path.join(sd, 'install.lock')} 再装`);
-    return 1;
-  }
-  try {
-    return applyPlan({ plan, writes, sd, home, runtime, remove, doClaude, doCodex, manifest, nextManifest, manifestFile });
-  } finally {
-    releaseInstallLock(sd);
-  }
-}
-
-function applyPlan({ plan, writes, sd, home, runtime, remove, doClaude, doCodex, manifest, nextManifest, manifestFile }) {
   const backups = path.join(sd, 'backups', stamp());
   for (const [file, content] of writes) {
     if (fs.existsSync(file)) {
