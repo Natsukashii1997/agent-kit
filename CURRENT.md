@@ -31,7 +31,7 @@
 9. ▶ skill 去留（第 11 项）：11-28 核对——
    - Vault **没有在定时备份**：LaunchAgents、Hermes 定时任务里都没有，Vault 的 Git 没有远端，时间机器没配置；restic 已装、没有备份配置。设置备份要常浩选存哪、本人输一次密码。
    - 只链 Codex 的 6 个按 `monthly-health.mjs --days 90` 都在用（business-project-router 129、thinking-model-capture 66、get-notes-retrieval 18、lark-doc-refine 12、skill-governance-audit 9、codex-usage-retrospective 5），全留；matt-flow 30 天 Codex 用了 7 次，不退役。
-   - 2026-11-28 常浩在问答框定：Vault 备份「先不设」；skill 可见性「关掉不用的插件」（先列近 30 天 0 次的 claude.ai 账号插件，再关，随时能重开）；全局第 9 节「补这一句」：飞书卡片样式的三版做成真卡片，私发常浩飞书确认，不用 Artifact 页面代替（11-25），放进瘦身 PR。
+   - 2026-11-28 常浩在问答框定：Vault 备份「先不设」；skill 可见性「关掉不用的插件」（先列近 30 天 0 次的 claude.ai 账号插件，再关，随时能重开）；全局第 9 节「补这一句」：飞书卡片样式的三版做成真卡片，私发常浩飞书确认，不用 Artifact 页面代替（11-25）。原定放进瘦身 PR；常浩 11-28 经驿窗回「都按推荐」改为单独合：PR #173（#172）已交合并执行器合并 `51e52ff`，审查链 `r1a221189bc101` 第 2 轮通过，审查后按常浩「按审查补一句」加了「单纯调样式直接做，做完也私发一张真卡片确认」；已装机（备份 `backups/20261128-085353/`），体检 ✓10 ⚠0 ✗0；Vault P-08 revision 18 已同步（`714ec32`、`4982074`）。瘦身 PR 不用再带这句。
    - 剩：automation-checkup 并进每周定时推送（要在 Hermes 加一个无模型定时任务和包装脚本）；ui-preflight 和说明被截掉的可见性问题（改本机插件配置，要常浩定）。
 10. ⏳ 能机械取的数自动化：等人工基线出来、口径稳定。
 
