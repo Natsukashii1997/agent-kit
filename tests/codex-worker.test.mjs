@@ -33,15 +33,20 @@ test('参数：新开、追加、另存、超时、缺参', () => {
   assert.match(parseArgs(['a', 'b', 'c']).error, /用法/);
 });
 
-test('命令：权限档案（根目录不可读、只放开运行目录、断网）、不读用户配置、关 apps 和子代理、MCP 置空；不混用旧 sandbox_mode', () => {
+test('命令：权限档案（根目录不可读、只放开运行目录、断网）、不读用户配置、关 apps、钩子和子代理、MCP 置空、代理变量不进命令；不混用旧 sandbox_mode', () => {
   const args = safetyArgs(['/tool']);
   for (const flag of ['--ignore-user-config', 'agents.enabled=false', 'mcp_servers={}', 'default_permissions="codex-worker"', 'web_search="disabled"', 'approval_policy="never"']) assert.ok(args.includes(flag), flag);
   assert.deepEqual(args.slice(1, 3), ['--disable', 'apps']);
+  assert.equal(args[args.indexOf('hooks') - 1], '--disable');
+  assert.ok(args.includes('shell_environment_policy.exclude=["*_PROXY", "*_proxy"]'));
   assert.ok(!args.some(a => /sandbox_mode|sandbox_workspace_write|danger|bypass/.test(a)));
   const profile = profileToml(['/tool', '/a "b']);
   assert.match(profile, /^permissions\.codex-worker=\{extends=":workspace", filesystem=\{":root"="deny", ":minimal"="read", "\/tool"="read", "\/a \\"b"="read"\}, network=\{enabled=false\}\}$/);
   assert.ok(args.includes(profileToml(['/tool'])));
 
+  const withGit = buildArgs({ task: 'T', resume: null, lastFile: '/x/last.md', dir: '/wt', gitDir: '/repo/.git' });
+  assert.ok(withGit.some(x => x.startsWith('permissions.codex-worker=') && x.includes('"/repo/.git"="read"')), 'git 数据目录只读放开');
+  assert.ok(!withGit.some(x => /"\/repo\/\.git"="write"/.test(x)));
   const fresh = buildArgs({ task: 'T', resume: null, lastFile: '/x/last.md', dir: '/wt' });
   assert.equal(fresh[0], 'exec');
   assert.ok(!fresh.includes('resume'));
@@ -56,10 +61,13 @@ test('命令：权限档案（根目录不可读、只放开运行目录、断�
   assert.equal(at, resumed.length - 3);
 });
 
-test('可读目录：只留存在的，包含运行本脚本的 node 所在前缀', () => {
+test('可读目录：只留存在的，放开 node 前缀和 Homebrew 下装程序的子目录，不放开整个前缀', () => {
   const roots = readRoots(process.execPath);
-  assert.ok(roots.includes(path.dirname(path.dirname(process.execPath))));
+  const prefix = path.dirname(path.dirname(process.execPath));
+  assert.ok(roots.includes(path.join(prefix, 'bin')));
   assert.ok(roots.every(r => fs.existsSync(r)));
+  for (const whole of [prefix, '/opt/homebrew', '/usr/local', '/opt/homebrew/etc', '/opt/homebrew/var', '/opt/homebrew/Library', '/usr/local/etc']) assert.ok(!roots.includes(whole), whole);
+  assert.ok(roots.every(r => !/\/(etc|var|Library)$/.test(r) || r === '/Library/Developer/CommandLineTools'));
   assert.ok(!readRoots('/no/such/bin/node').includes('/no/such'));
 });
 
@@ -82,6 +90,23 @@ test('系统级、项目级 Codex 配置：存在就报；工作树根 config.to
     fs.mkdirSync(path.dirname(user), { recursive: true });
     fs.writeFileSync(user, '[mcp_servers.x]\ncommand = "x"\n');
     assert.deepEqual(foreignCodexConfigs(wt, opts), []);
+    // 项目里的 .codex/config.toml 或整个 .codex 做成指向用户配置的符号链接：位置不是用户配置，照样拒（第 5 轮 P1-06）
+    const projDir = path.join(base, 'home', 'proj', '.codex');
+    fs.mkdirSync(projDir);
+    fs.symlinkSync(user, path.join(projDir, 'config.toml'));
+    assert.deepEqual(foreignCodexConfigs(wt, opts), [path.join(projDir, 'config.toml')]);
+    fs.rmSync(projDir, { recursive: true });
+    fs.symlinkSync(path.dirname(user), projDir);
+    assert.deepEqual(foreignCodexConfigs(wt, opts), [path.join(projDir, 'config.toml')]);
+    fs.rmSync(projDir);
+    fs.mkdirSync(projDir);
+    fs.symlinkSync(path.join(base, 'no-such'), path.join(projDir, 'config.toml'));
+    assert.deepEqual(foreignCodexConfigs(wt, opts), [path.join(projDir, 'config.toml')], '断了的链接也拒');
+    fs.rmSync(projDir, { recursive: true });
+    // 用户配置所在目录的上级是符号链接（如 /var → /private/var）：规范化上级后仍认得出，跳过
+    const linkedHome = path.join(base, 'home-link');
+    fs.symlinkSync(path.join(base, 'home'), linkedHome);
+    assert.deepEqual(foreignCodexConfigs(wt, { ...opts, user: path.join(linkedHome, '.codex', 'config.toml') }), []);
     // 项目级：内容无关，存在就报（同名 permissions 档案会合并放开读取）
     const proj = path.join(base, 'home', 'proj', '.codex', 'config.toml');
     fs.mkdirSync(path.dirname(proj));
@@ -107,7 +132,7 @@ test('系统级、项目级 Codex 配置：存在就报；工作树根 config.to
 
 test('环境：GIT_* 去掉；给 Codex 的只留白名单（令牌、SSH 代理去掉，代理和证书保留）', () => {
   assert.deepEqual(cleanEnv({ GIT_DIR: '/x', GIT_WORK_TREE: '/y', PATH: '/bin', HOME: '/h' }), { PATH: '/bin', HOME: '/h' });
-  assert.deepEqual(codexEnv({ GIT_DIR: '/x', GIT_CONFIG_GLOBAL: '/home/.gitconfig', PATH: '/bin', HOME: '/h', LC_ALL: 'C', https_proxy: 'http://p', SSL_CERT_FILE: '/c', CLAUDE_CODE_MESSAGING_TOKEN: 's', GITHUB_TOKEN: 's', SSH_AUTH_SOCK: '/s', OPENAI_API_KEY: 's', AWS_SECRET_ACCESS_KEY: 's' }),
+  assert.deepEqual(codexEnv({ GIT_DIR: '/x', GIT_CONFIG_GLOBAL: '/home/.gitconfig', PATH: '/bin', HOME: '/h', LC_ALL: 'C', LC_SECRET_THING: 's', https_proxy: 'http://p', SSL_CERT_FILE: '/c', CLAUDE_CODE_MESSAGING_TOKEN: 's', GITHUB_TOKEN: 's', SSH_AUTH_SOCK: '/s', OPENAI_API_KEY: 's', AWS_SECRET_ACCESS_KEY: 's' }),
     { PATH: '/bin', HOME: '/h', LC_ALL: 'C', https_proxy: 'http://p', SSL_CERT_FILE: '/c', GIT_CONFIG_GLOBAL: '/dev/null' });
 });
 
@@ -120,7 +145,7 @@ test('工作树检查：拒绝非 git、仓库主目录、分离头指针、main
     git(r.main, 'checkout', '-q', '-b', 'other');
     assert.match(checkWorktree(r.main).error, /仓库主目录/, '主目录切到别的分支也拒绝');
     git(r.main, 'checkout', '-q', 'main');
-    assert.deepEqual(checkWorktree(r.wt), { root: r.wt, branch: 'feature' });
+    assert.deepEqual(checkWorktree(r.wt), { root: r.wt, branch: 'feature', gitDir: path.join(r.main, '.git') }, 'git 数据目录是主仓库的 .git');
     fs.mkdirSync(path.join(r.wt, 'sub'));
     assert.equal(checkWorktree(path.join(r.wt, 'sub')).root, r.wt);
     const saved = process.env.GIT_DIR;

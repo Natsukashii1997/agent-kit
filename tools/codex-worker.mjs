@@ -22,15 +22,19 @@ const CODEX_BIN = process.env.CODEX_WORKER_BIN || 'codex';
 
 // 权限用 Codex 的权限档案（default_permissions + [permissions.codex-worker]），不用旧的 sandbox_mode（两者不能混用）：
 // - 不读用户 config.toml（那里默认 danger-full-access，还挂着 7 个 MCP 服务、插件和钩子）；关掉 apps 连接器（含 GitHub 评论等
-//   对外动作）、goals 和子代理（agents.enabled=false）；mcp_servers 置空只是顺手，不靠它：系统级和项目级配置由 foreignCodexConfigs 事前拒绝。
-// - 文件系统：根目录全部不可读，只放开系统运行必需的 :minimal 和工具链目录（READ_ROOTS）；工作树可写（继承 :workspace，
-//   它也让 $TMPDIR 和 /tmp 可写，测试和构建常要用）；网络关。
+//   对外动作）、goals、钩子（hooks.json 单独放、在宿主机上跑）和子代理（agents.enabled=false）；mcp_servers 置空只是顺手，
+//   不靠它：系统级和项目级配置由 foreignCodexConfigs 事前拒绝。代理变量不进 Codex 跑的命令。
+// - 文件系统：根目录全部不可读，只放开系统运行必需的 :minimal 和工具链里装程序的子目录（readRoots）；工作树可写（继承 :workspace，
+//   它也让 $TMPDIR 和 /tmp 可写，测试和构建常要用，有意保留：断网，写到这里也带不出去）；网络关。
 // 2026-11-27 实测（Codex 0.166.0，macOS）：~/.zshrc、~/.ssh 读不到（Operation not permitted），curl 连不出，工作树外写入被拒，
 // 工具里没有用户 MCP、apps、子代理。
 export const PROFILE = 'codex-worker';
 export function readRoots(execPath = process.execPath) {
   // node 自己的前缀；Homebrew；Xcode 命令行工具（/usr/bin/git 要用）；系统 OpenSSL 配置（node 启动要读 openssl.cnf）
-  const candidates = [path.dirname(path.dirname(execPath)), '/opt/homebrew', '/usr/local', '/Library/Developer/CommandLineTools', '/System/Library/OpenSSL'];
+  // 只放开装程序的子目录（bin、lib、Cellar 这些），不放开整个前缀：etc、var、Library 里可能有本机配置和数据
+  const prefixes = [path.dirname(path.dirname(execPath)), '/opt/homebrew', '/usr/local'];
+  const subdirs = ['bin', 'sbin', 'lib', 'libexec', 'include', 'share', 'opt', 'Cellar', 'Frameworks'];
+  const candidates = [...prefixes.flatMap(p => subdirs.map(d => path.join(p, d))), '/Library/Developer/CommandLineTools', '/System/Library/OpenSSL'];
   return [...new Set(candidates)].filter(p => fs.existsSync(p));
 }
 export function profileToml(roots) {
@@ -42,11 +46,15 @@ export function safetyArgs(roots = readRoots()) {
     '--ignore-user-config',
     '--disable', 'apps',
     '--disable', 'goals',
+    // 钩子在宿主机上跑、不进沙箱，而且用户钩子单独放在 $CODEX_HOME/hooks.json，--ignore-user-config 管不到它（本机就有）
+    '--disable', 'hooks',
     '-c', 'agents.enabled=false',
     '-c', 'mcp_servers={}',
     '-c', `default_permissions="${PROFILE}"`,
     '-c', profileToml(roots),
     '-c', 'web_search="disabled"',
+    // 代理变量要留给 Codex 自己连服务端，但不进它跑的命令：代理地址里可能带用户名和密码
+    '-c', 'shell_environment_policy.exclude=["*_PROXY", "*_proxy"]',
     '-c', 'approval_policy="never"',
   ];
 }
@@ -60,6 +68,13 @@ export const SYSTEM_DIRS = ['/etc/codex'];
 export const MANAGED_PREFS = ['/Library/Managed Preferences/com.openai.codex.plist'];
 export const userConfig = (env = process.env) => path.join(env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
 const CODEX_KEYS = /^\s*\[*\s*"?(sandbox_mode|sandbox_workspace_write|default_permissions|permissions|mcp_servers|shell_environment_policy|profiles?|approval_policy|model_providers|features|plugins|agents|apps)\b/m;
+const isLink = f => {
+  try {
+    return fs.lstatSync(f).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
 export function foreignCodexConfigs(root, { systemDirs = SYSTEM_DIRS, managedPrefs = MANAGED_PREFS, user = userConfig() } = {}) {
   const hits = [];
   for (const d of systemDirs) {
@@ -68,10 +83,13 @@ export function foreignCodexConfigs(root, { systemDirs = SYSTEM_DIRS, managedPre
     } catch {}
   }
   for (const f of managedPrefs) if (fs.existsSync(f)) hits.push(f);
-  const skip = fs.existsSync(user) ? fs.realpathSync(user) : user;
+  // 只认「这个位置就是用户配置」：比的是配置文件所在的位置（上级目录规范化后），不是它最终指向哪里。
+  // 项目里的 .codex/config.toml 或 .codex 目录做成指向用户配置的符号链接，Codex 照样当项目配置加载，要拒。
+  const home = path.dirname(user);
+  const userAt = path.join(real(path.dirname(home)), path.basename(home), path.basename(user));
   for (let d = root; ; d = path.dirname(d)) {
     const f = path.join(d, '.codex', 'config.toml');
-    if (fs.existsSync(f) && fs.realpathSync(f) !== skip) hits.push(f);
+    if ((fs.existsSync(f) || isLink(f) || isLink(path.dirname(f))) && path.join(real(d), '.codex', 'config.toml') !== userAt) hits.push(f);
     if (path.dirname(d) === d) break;
   }
   try {
@@ -114,9 +132,10 @@ export function parseArgs(argv) {
 }
 
 // 所有选项都放在 exec 这一级、resume 之前：实测 `codex exec -C <B> ... resume <A 的会话>` 会在 B 里续接
-export function buildArgs({ task, resume, lastFile, dir }) {
+// gitDir：仓库的 git 数据目录（独立工作树的在主仓库 .git 里、不在工作树内），只读放开，git status、diff 才能用；不可写，所以提交不了
+export function buildArgs({ task, resume, lastFile, dir, gitDir }) {
   return [
-    'exec', ...safetyArgs(),
+    'exec', ...safetyArgs(gitDir ? [...readRoots(), gitDir] : readRoots()),
     '-C', dir,
     '-m', MODEL, '-c', `model_reasoning_effort="${EFFORT}"`,
     '--json', '-o', lastFile,
@@ -131,7 +150,7 @@ export const cleanEnv = (env = process.env) => Object.fromEntries(Object.entries
 // 给 Codex 的环境只留白名单：Codex 跑的命令继承它，派活会话的环境里有令牌（如 CLAUDE_CODE_MESSAGING_TOKEN）和 SSH_AUTH_SOCK，
 // 模型跑一下 env 就能读到。留下的是运行和登录要用的（代理、证书给 Codex 自己连服务端用）。GIT_* 一个不留，再让 git 不读用户的
 // ~/.gitconfig（沙箱里读不到会直接报错退出，那里也可能有凭据配置）。
-const ENV_KEEP = /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|LANG|LC_[A-Z]+|TERM|TZ|CODEX_HOME|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|CODEX_CA_CERTIFICATE|(HTTPS?|ALL|NO)_PROXY)$/i;
+const ENV_KEEP = /^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|LANG|LC_(?:ALL|CTYPE|COLLATE|MESSAGES|MONETARY|NUMERIC|TIME)|TERM|TZ|CODEX_HOME|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|CODEX_CA_CERTIFICATE|(HTTPS?|ALL|NO)_PROXY)$/i;
 export const codexEnv = (env = process.env) => ({ ...Object.fromEntries(Object.entries(env).filter(([k]) => ENV_KEEP.test(k))), GIT_CONFIG_GLOBAL: '/dev/null' });
 
 const gitIn = (dir, args) => {
@@ -157,7 +176,8 @@ export function checkWorktree(dir) {
   const first = /^worktree (.+)$/m.exec(gitIn(root, ['worktree', 'list', '--porcelain']).out)?.[1];
   if (!first) return { error: '读不到 git worktree 列表' };
   if (real(first) === root) return { error: '这是仓库主目录，不是独立工作树：先 git worktree add 一个再派活' };
-  return { root, branch };
+  const gitDir = real(gitIn(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']).out);
+  return { root, branch, gitDir };
 }
 
 export function snapshot(root) {
@@ -321,7 +341,7 @@ async function main(argv) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-worker-'));
   const lastFile = path.join(tmp, 'last.md');
   try {
-    const run = await runCodex(buildArgs({ task, resume: opts.resume, lastFile, dir: wt.root }), { cwd: wt.root, timeoutMs: opts.timeoutMin * 60000 });
+    const run = await runCodex(buildArgs({ task, resume: opts.resume, lastFile, dir: wt.root, gitDir: wt.gitDir }), { cwd: wt.root, timeoutMs: opts.timeoutMin * 60000 });
     const last = fs.existsSync(lastFile) ? fs.readFileSync(lastFile, 'utf8').trim() : '';
     const after = snapshot(wt.root);
     const verdict = judge({ run, last, before, after });
